@@ -12,7 +12,7 @@
 //   Talks to our news.NewsDraft + news.NewsItem tables via raw SQL through the
 //   existing PrismaService. No modifications to Postiz's prisma schema.
 
-import { Controller, Get, Post, Param, Query, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Logger } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { ApiTags } from '@nestjs/swagger';
@@ -104,6 +104,47 @@ export class DraftsController {
     } catch (err) {
       this.logger.warn(`drafts/history query failed: ${(err as Error).message}`);
       return { drafts: [] };
+    }
+  }
+
+  @Post('/compose')
+  async compose(
+    @GetOrgFromRequest() _org: Organization,
+    @Body() body: { prompt?: string }
+  ): Promise<{ ok: boolean; itemId?: string; message: string }> {
+    const prompt = (body?.prompt || '').trim();
+    if (prompt.length < 15) {
+      return { ok: false, message: 'Please type at least 15 characters describing what you want to post about.' };
+    }
+    if (prompt.length > 4000) {
+      return { ok: false, message: 'Prompt too long. Keep it under 4000 characters.' };
+    }
+
+    try {
+      const id = `manual_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const title = prompt.slice(0, 120).replace(/\s+/g, ' ');
+      const urlPlaceholder = `urn:manual:${id}`;
+      const urlHashFn = (s: string) => {
+        // simple sha1-ish for unique constraint; use prisma raw with md5
+        return s;
+      };
+
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO news."NewsItem"
+           (id, url, "urlHash", title, summary, content, source, category, "publishedAt", "fetchedAt", score, status, metadata)
+         VALUES
+           ($1, $2, MD5($2), $3, $4, $4, 'manual', 'manual', NOW(), NOW(), 5.0, 'priority', $5::jsonb)`,
+        id, urlPlaceholder, title, prompt, JSON.stringify({ kind: 'manual-compose' })
+      );
+
+      return {
+        ok: true,
+        itemId: id,
+        message: 'Queued. Your draft will appear here within ~10 minutes.',
+      };
+    } catch (err) {
+      this.logger.error(`drafts/compose failed: ${(err as Error).message}`);
+      return { ok: false, message: `Failed to queue: ${(err as Error).message}` };
     }
   }
 

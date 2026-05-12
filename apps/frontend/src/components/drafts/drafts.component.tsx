@@ -58,7 +58,10 @@ const useDrafts = (mode: 'pending' | 'history') => {
 
 export const DraftsComponent: FC = () => {
   const [mode, setMode] = useState<'pending' | 'history'>('pending');
-  const [showRules, setShowRules] = useState(true);
+  const [showRules, setShowRules] = useState(false);
+  const [showCompose, setShowCompose] = useState(false);
+  const [composePrompt, setComposePrompt] = useState('');
+  const [composing, setComposing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const { data, isLoading, mutate } = useDrafts(mode);
@@ -81,6 +84,31 @@ export const DraftsComponent: FC = () => {
     await fetch(`/drafts/${draftId}/regenerate`, { method: 'POST' });
     void mutate();
   }, [fetch, mutate]);
+
+  const onCompose = useCallback(async () => {
+    if (composePrompt.trim().length < 15) {
+      setToast('Type at least 15 characters describing what you want to post about.');
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    setComposing(true);
+    try {
+      const res = await fetch('/drafts/compose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: composePrompt.trim() }),
+      });
+      const json = (await res.json()) as { ok: boolean; message: string };
+      setToast(json.message);
+      if (json.ok) {
+        setComposePrompt('');
+        setShowCompose(false);
+      }
+      setTimeout(() => setToast(null), 6000);
+    } finally {
+      setComposing(false);
+    }
+  }, [fetch, composePrompt]);
 
   const onGenerate = useCallback(async () => {
     setGenerating(true);
@@ -106,17 +134,56 @@ export const DraftsComponent: FC = () => {
           <div>
             <div className="text-[20px] font-[600] text-newTextColor">Drafts</div>
             <div className="text-[14px] text-textItemBlur mt-[4px]">
-              AI-generated personal social drafts. Pick one to edit and schedule, or skip and the system learns.
+              Bilingual personal posts in your voice. Tell the engine what to write about, or let it pick from Omani/GCC news.
             </div>
           </div>
-          <button
-            onClick={onGenerate}
-            disabled={generating}
-            className="px-[18px] py-[10px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
-          >
-            {generating ? 'Queuing...' : '+ Generate now'}
-          </button>
+          <div className="flex gap-[8px]">
+            <button
+              onClick={() => setShowCompose((v) => !v)}
+              className="px-[18px] py-[10px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90 whitespace-nowrap"
+            >
+              {showCompose ? 'Cancel' : '+ Write a post'}
+            </button>
+            <button
+              onClick={onGenerate}
+              disabled={generating}
+              className="px-[18px] py-[10px] bg-newBgLineColor text-newTextColor rounded-[8px] text-[13px] hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
+            >
+              {generating ? 'Queuing...' : 'Pick from news'}
+            </button>
+          </div>
         </div>
+
+        {/* Compose card */}
+        {showCompose && (
+          <div className="bg-newBgColor border border-blockSeparator rounded-[12px] p-[20px]">
+            <div className="text-[14px] font-[600] text-newTextColor mb-[6px]">Tell the engine what to post about</div>
+            <div className="text-[12px] text-textItemBlur mb-[12px] leading-[1.5]">
+              Type a few sentences in any language. Mention people by name, name the event, give the result. The engine drafts a bilingual post in your voice (Arabic + English on LinkedIn, Arabic on X), with a cover image.
+              <br />
+              Example: "Attended the ITHCA cohort 4 graduation today at OAPP. Dr Salim Al-Ismaili spoke. 18 founders graduated, 3 already signed funding rounds. First cohort to include 4 female founders."
+            </div>
+            <textarea
+              value={composePrompt}
+              onChange={(e) => setComposePrompt(e.target.value)}
+              placeholder="What do you want to post about?"
+              rows={5}
+              className="w-full px-[12px] py-[10px] bg-newBgColorInner border border-blockSeparator rounded-[8px] text-[14px] text-newTextColor resize-y"
+            />
+            <div className="flex items-center justify-between mt-[10px]">
+              <div className="text-[11px] text-textItemBlur">
+                {composePrompt.length} chars{composePrompt.length < 15 && composePrompt.length > 0 ? ' (need ≥15)' : ''}
+              </div>
+              <button
+                onClick={onCompose}
+                disabled={composing || composePrompt.trim().length < 15}
+                className="px-[18px] py-[8px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90 disabled:opacity-50"
+              >
+                {composing ? 'Queuing...' : 'Draft this'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {toast && (
           <div className="px-[16px] py-[12px] bg-newBgLineColor rounded-[8px] text-[13px] text-newTextColor">
@@ -137,12 +204,13 @@ export const DraftsComponent: FC = () => {
           </div>
           {showRules && (
             <div className="text-[13px] text-textItemBlur leading-[1.6]">
-              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">Audience:</span> GCC sovereign-tech officials, ITHCA/OIA-tier executives, ministry heads. Reader is in the room on these decisions.</p>
+              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">Audience:</span> ITHCA/OIA-tier executives, GCC sovereign-tech officials, ministry heads. Reader is in the room on these decisions.</p>
               <p className="mb-[8px]"><span className="text-newTextColor font-[600]">Voice:</span> Measured, institutional, not founder-bro. No "we built X for this". Vision 2040 + GCC peer context where natural.</p>
-              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">LinkedIn:</span> Bilingual. Arabic block (350-650 chars) + blank line + English block (350-650 chars). Not word-for-word translations. Total 700-1300 chars, hard ceiling 1500.</p>
-              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">X:</span> Always Arabic. &lt;230 chars target, hard ceiling 270.</p>
-              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">Banned:</span> em-dashes, hashtags, emoji, closing-question CTAs, GPT-isms (delve, leverage, paradigm), founder-bro framings ("we built Hosn for"), parallel triplets, markdown bold.</p>
-              <p><span className="text-newTextColor font-[600]">Learning loop:</span> Every skip becomes a negative training example. The drafter sees the last 8 skipped drafts per category and is told to avoid them.</p>
+              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">Sources:</span> Tell the engine what to write about ("Write a post"), or it picks from Oman Observer, Times of Oman, ITHCA/OIA, MGX, G42, Gulf Business. Global AI/HN/arxiv dropped (not your beat).</p>
+              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">LinkedIn:</span> Bilingual. Arabic + English, not word-for-word. 700-1300 chars target.</p>
+              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">X:</span> Always Arabic. &lt;230 chars target.</p>
+              <p className="mb-[8px]"><span className="text-newTextColor font-[600]">Banned:</span> em-dashes, GPT-isms (delve, leverage, paradigm), founder-bro framings, closing-question CTAs, parallel triplets.</p>
+              <p><span className="text-newTextColor font-[600]">Learning loop:</span> Every skip becomes a negative training example. The drafter sees the last 8 skipped drafts per category and avoids those patterns.</p>
             </div>
           )}
         </div>
@@ -168,7 +236,7 @@ export const DraftsComponent: FC = () => {
         {!isLoading && (!data || data.drafts.length === 0) && (
           <div className="text-textItemBlur p-[24px] bg-newBgColor rounded-[12px] border border-blockSeparator">
             {mode === 'pending'
-              ? 'No drafts pending. Click "Generate now" or wait for the next scheduled run (every 10 minutes).'
+              ? 'No drafts pending. Click "+ Write a post" to seed one from your own notes, or "Pick from news" to draft from the latest Omani/GCC headlines.'
               : 'No history yet. Once you skip or regenerate drafts, they will appear here.'}
           </div>
         )}
