@@ -28,5 +28,5 @@ COPY apps/backend/src/api/routes/drafts.controller.ts \
 COPY apps/backend/src/api/api.module.ts \
   /app/apps/backend/src/api/api.module.ts
 
-# --- Rebuild frontend + backend in place ---
-RUN pnpm run build:frontend && pnpm run build:backend
+# --- Reinstall deps (official image is pruned) then rebuild frontend + backend in place ---
+RUN pnpm install --prefer-offline --no-frozen-lockfile && pnpm run build:frontend && pnpm run build:backend

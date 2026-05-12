@@ -1,22 +1,21 @@
-/* BHD: drafts controller — backs the personal-content "Drafts" sidebar tab.
- *
- * Survivability:
- *   - Entire file is new; nothing in Postiz core changed.
- *   - Talks to our own news_drafts table via raw SQL through the existing
- *     PrismaService (same DB, separate `news` schema). No modifications to
- *     Postiz's prisma schema.
- *   - Registration in app.module.ts is the only other core touch (one line,
- *     marked with /* BHD: drafts */ comment).
- *
- * v1 scope (this commit):
- *   - GET /drafts/list      → list pending drafts joined with news_items
- *   - POST /drafts/:id/skip → mark draft skipped
- *   - POST /drafts/:id/regenerate → enqueue regeneration (stub for now)
- *   - POST /drafts/:id/launch     → push into Postiz launches as a draft post,
- *     return its postId so the UI can redirect to /launches?id=<postId>.
- *     Launch wiring is stubbed in v1 — returns a placeholder while we finish
- *     the PostsService integration in v2.
- */
+// BHD: drafts controller — backs the personal-content "Drafts" sidebar tab.
+//
+// Survivability:
+//   - Entire file is new; nothing in Postiz core changed.
+//   - Talks to our own news_drafts table via raw SQL through the existing
+//     PrismaService (same DB, separate `news` schema). No modifications to
+//     Postiz's prisma schema.
+//   - Registration in app.module.ts is the only other core touch (one line,
+//     marked with a BHD comment).
+//
+// v1 scope (this commit):
+//   - GET /drafts/list      → list pending drafts joined with news_items
+//   - POST /drafts/:id/skip → mark draft skipped
+//   - POST /drafts/:id/regenerate → enqueue regeneration (stub for now)
+//   - POST /drafts/:id/launch     → push into Postiz launches as a draft post,
+//     return its postId so the UI can redirect to /launches?id=<postId>.
+//     Launch wiring is stubbed in v1, returns a placeholder while we finish
+//     the PostsService integration in v2.
 
 import { Controller, Get, Post, Param, Logger } from '@nestjs/common';
 import { Organization } from '@prisma/client';
