@@ -1,0 +1,46 @@
+# BHD fork side-by-side compose.
+# Runs the BHD fork (bhd-postiz) on port 5511 alongside the live postiz on 5510.
+# Same env, same volumes, same network as the live container — only the image
+# and the host port differ.
+#
+# Use:
+#   cd /opt/postiz-bhd
+#   docker compose -f docker-compose.bhd.yaml up -d
+#
+# The live `postiz` container at /opt/postiz/docker-compose.yaml stays running.
+# To cut over: change nginx upstream from 5510 to 5511 and reload.
+# To roll back: change nginx back to 5510. The old container is still healthy.
+
+services:
+  postiz-bhd:
+    image: bhd-postiz:latest
+    container_name: postiz-bhd
+    restart: always
+    env_file:
+      - /opt/postiz/.env
+    volumes:
+      - postiz_postiz-config:/config/
+      - postiz_postiz-uploads:/uploads/
+      - /opt/postiz/patches/linkedin.provider.backend.js:/app/apps/backend/dist/libraries/nestjs-libraries/src/integrations/social/linkedin.provider.js:ro
+      - /opt/postiz/patches/linkedin.provider.orchestrator.js:/app/apps/orchestrator/dist/libraries/nestjs-libraries/src/integrations/social/linkedin.provider.js:ro
+    ports:
+      - "127.0.0.1:5511:5000"
+    networks:
+      - postiz-network
+      - temporal-network
+
+networks:
+  postiz-network:
+    name: postiz_postiz-network
+    external: true
+  temporal-network:
+    name: postiz_temporal-network
+    external: true
+
+volumes:
+  postiz_postiz-config:
+    name: postiz_postiz-config
+    external: true
+  postiz_postiz-uploads:
+    name: postiz_postiz-uploads
+    external: true
