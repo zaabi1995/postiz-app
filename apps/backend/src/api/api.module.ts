@@ -38,6 +38,10 @@ import { ApprovedAppsController } from '@gitroom/backend/api/routes/approved-app
 import { OAuthController, OAuthAuthorizedController } from '@gitroom/backend/api/routes/oauth.controller';
 import { AnnouncementsController } from '@gitroom/backend/api/routes/announcements.controller';
 import { AdminController } from '@gitroom/backend/api/routes/admin.controller';
+/* BHD: drafts controller for the personal-content engine.
+   Reverts cleanly on upstream merge: delete this import and the
+   DraftsController entry in authenticatedController below. */
+import { DraftsController } from '@gitroom/backend/api/routes/drafts.controller';
 import { AuthProviderManager } from '@gitroom/backend/services/auth/providers/providers.manager';
 import { GithubProvider } from '@gitroom/backend/services/auth/providers/github.provider';
 import { GoogleProvider } from '@gitroom/backend/services/auth/providers/google.provider';
@@ -65,6 +69,7 @@ const authenticatedController = [
   OAuthAuthorizedController,
   AnnouncementsController,
   AdminController,
+  DraftsController, /* BHD: drafts */
 ];
 @Module({
   imports: [UploadModule],

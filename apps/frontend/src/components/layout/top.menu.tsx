@@ -137,6 +137,32 @@ export const useMenuItem = () => {
       ),
       path: '/plugs',
     },
+    /* BHD: drafts nav — fork-survivable single-line addition.
+       Backend lives at apps/backend/src/api/routes/drafts.controller.ts.
+       Route page at apps/frontend/src/app/(app)/(site)/drafts/page.tsx.
+       Reverts cleanly on upstream merge: delete this block. */
+    {
+      name: t('drafts', 'Drafts'),
+      icon: (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+        >
+          <path
+            d="M9 12h6m-6 4h4M7 21h10a2 2 0 0 0 2-2V7.414a2 2 0 0 0-.586-1.414l-3.414-3.414A2 2 0 0 0 13.586 2H7a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2z"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <circle cx="17" cy="6" r="3" fill="#7c3aed" />
+        </svg>
+      ),
+      path: '/drafts',
+    },
     {
       name: t('integrations', 'Integrations'),
       icon: (
