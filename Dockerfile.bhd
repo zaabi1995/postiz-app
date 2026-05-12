@@ -1,0 +1,32 @@
+# BHD fork build — hybrid approach.
+# Uses the official Postiz image as the base (which already has node_modules
+# and built dist/) then overlays our BHD changes and rebuilds.
+#
+# Build:
+#   docker build -f Dockerfile.bhd -t bhd-postiz:latest .
+#
+# Files copied are only the ones we changed (see /* BHD: drafts */ markers
+# in the codebase). Everything else stays as upstream.
+
+FROM ghcr.io/gitroomhq/postiz-app:latest
+
+WORKDIR /app
+
+# --- Our changes (source) ---
+COPY apps/frontend/src/components/layout/top.menu.tsx \
+  /app/apps/frontend/src/components/layout/top.menu.tsx
+
+COPY apps/frontend/src/app/(app)/(site)/drafts/ \
+  /app/apps/frontend/src/app/(app)/(site)/drafts/
+
+COPY apps/frontend/src/components/drafts/ \
+  /app/apps/frontend/src/components/drafts/
+
+COPY apps/backend/src/api/routes/drafts.controller.ts \
+  /app/apps/backend/src/api/routes/drafts.controller.ts
+
+COPY apps/backend/src/api/api.module.ts \
+  /app/apps/backend/src/api/api.module.ts
+
+# --- Rebuild frontend + backend in place ---
+RUN pnpm run build:frontend && pnpm run build:backend
