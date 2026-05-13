@@ -10,10 +10,14 @@
 
 'use client';
 
-import { FC, useCallback, useState } from 'react';
+import { FC, useCallback, useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { useRouter } from 'next/navigation';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
+import dayjs from 'dayjs';
+import { CalendarWeekProvider } from '@gitroom/frontend/components/launches/calendar.context';
+import { useIntegrationList } from '@gitroom/frontend/components/launches/helpers/use.integration.list';
+import { AddEditModal } from '@gitroom/frontend/components/new-launch/add.edit.modal';
 
 interface DraftRow {
   id: string;
@@ -59,6 +63,17 @@ const useDrafts = (mode: 'pending' | 'history') => {
 };
 
 export const DraftsComponent: FC = () => {
+  const { data: integrationsData } = useIntegrationList();
+  const integrations = useMemo(() => integrationsData || [], [integrationsData]);
+  return (
+    <CalendarWeekProvider integrations={integrations}>
+      <DraftsInner integrations={integrations} />
+    </CalendarWeekProvider>
+  );
+};
+
+const DraftsInner: FC<{ integrations: any[] }> = ({ integrations }) => {
+  const [launchingDraft, setLaunchingDraft] = useState<DraftRow | null>(null);
   const [mode, setMode] = useState<'pending' | 'history'>('pending');
   const [showRules, setShowRules] = useState(false);
   const [showCompose, setShowCompose] = useState(false);
@@ -72,22 +87,11 @@ export const DraftsComponent: FC = () => {
   const fetch = useFetch();
 
   const onCopyAndOpen = useCallback(async (draft: DraftRow) => {
-    // One-click: create a real Postiz draft Post via PostsService, then
-    // drop the user in their native composer for that post.
-    const res = await fetch(`/drafts/${draft.id}/launch`, { method: 'POST' });
-    const json = (await res.json()) as { ok: boolean; groupId?: string; postIds?: string[]; message?: string };
-    if (!json.ok) {
-      setToast(json.message || 'Launch failed.');
-      setTimeout(() => setToast(null), 5000);
-      return;
-    }
-    setToast('Created in Postiz. Opening composer...');
-    setTimeout(() => setToast(null), 3000);
-    void mutate();
-    // Land on the calendar; Postiz surfaces the new draft post there.
-    const url = json.groupId ? `/launches?group=${json.groupId}` : '/launches';
-    window.location.href = url;
-  }, [fetch, mutate]);
+    // Embedded composer: open Postiz's AddEditModal inline rather than
+    // navigating to /launches. The modal handles per-channel editing,
+    // image attachment, and scheduling natively. No clipboard, no nav.
+    setLaunchingDraft(draft);
+  }, []);
 
   const onCopyOne = useCallback(async (text: string, label: string) => {
     try {
@@ -424,6 +428,29 @@ export const DraftsComponent: FC = () => {
           />
         ))}
       </div>
+
+      {launchingDraft && (
+        <AddEditModal
+          date={dayjs().add(1, 'day').hour(9).minute(0)}
+          integrations={integrations}
+          allIntegrations={integrations}
+          selectedChannels={
+            integrations
+              .filter((i: any) => /^linkedin/.test(i.providerIdentifier) || i.providerIdentifier === 'x')
+              .map((i: any) => i.id)
+          }
+          onlyValues={[{
+            content: launchingDraft.linkedinBody || launchingDraft.xBody || '',
+            image: (launchingDraft.metadata?.images || []).slice(0, 4).map((url) => ({
+              id: url,  // placeholder; Postiz Media flow may need a real id
+              path: url,
+            })),
+          }]}
+          reopenModal={() => {}}
+          mutate={() => { void mutate(); }}
+          customClose={() => setLaunchingDraft(null)}
+        />
+      )}
     </div>
   );
 };
