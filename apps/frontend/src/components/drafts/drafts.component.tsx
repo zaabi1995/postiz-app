@@ -68,12 +68,34 @@ export const DraftsComponent: FC = () => {
   const router = useRouter();
   const fetch = useFetch();
 
-  const onLaunch = useCallback(async (draftId: string) => {
-    const res = await fetch(`/drafts/${draftId}/launch`, { method: 'POST' });
-    if (!res.ok) return;
-    const json = (await res.json()) as { postId: string };
-    router.push(`/launches?id=${json.postId}`);
-  }, [fetch, router]);
+  const onCopyAndOpen = useCallback(async (draft: DraftRow) => {
+    const blob = `${draft.linkedinBody}\n\n---\n\nX (Arabic):\n${draft.xBody}${draft.imageUrl ? `\n\nImage: ${draft.imageUrl}` : ''}`;
+    try {
+      await navigator.clipboard.writeText(blob);
+      setToast('Copied LinkedIn + X + image URL to clipboard. Opening Postiz composer...');
+    } catch {
+      setToast('Clipboard blocked by browser. Open the draft body manually.');
+    }
+    setTimeout(() => setToast(null), 5000);
+    window.open('/launches', '_blank');
+  }, []);
+
+  const onCopyOne = useCallback(async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast(`Copied ${label} to clipboard.`);
+    } catch {
+      setToast('Clipboard blocked by browser.');
+    }
+    setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  const onShip = useCallback(async (draftId: string) => {
+    await fetch(`/drafts/${draftId}/ship`, { method: 'POST' });
+    setToast('Marked as shipped. Moved to History.');
+    setTimeout(() => setToast(null), 4000);
+    void mutate();
+  }, [fetch, mutate]);
 
   const onSkip = useCallback(async (draftId: string) => {
     await fetch(`/drafts/${draftId}/skip`, { method: 'POST' });
@@ -246,7 +268,9 @@ export const DraftsComponent: FC = () => {
             key={draft.id}
             draft={draft}
             mode={mode}
-            onLaunch={onLaunch}
+            onCopyAndOpen={onCopyAndOpen}
+            onCopyOne={onCopyOne}
+            onShip={onShip}
             onSkip={onSkip}
             onRegenerate={onRegenerate}
           />
@@ -259,10 +283,12 @@ export const DraftsComponent: FC = () => {
 const DraftCard: FC<{
   draft: DraftRow;
   mode: 'pending' | 'history';
-  onLaunch: (id: string) => void;
+  onCopyAndOpen: (draft: DraftRow) => void;
+  onCopyOne: (text: string, label: string) => void;
+  onShip: (id: string) => void;
   onSkip: (id: string) => void;
   onRegenerate: (id: string) => void;
-}> = ({ draft, mode, onLaunch, onSkip, onRegenerate }) => {
+}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate }) => {
   return (
     <div className="bg-newBgColor rounded-[12px] border border-blockSeparator p-[20px] flex flex-col gap-[16px]">
       <div className="flex items-start gap-[12px]">
@@ -311,22 +337,43 @@ const DraftCard: FC<{
       </div>
 
       {mode === 'pending' && (
-        <div className="flex gap-[8px]">
+        <div className="flex gap-[8px] flex-wrap">
           <button
-            onClick={() => onLaunch(draft.id)}
+            onClick={() => onCopyAndOpen(draft)}
             className="px-[16px] py-[8px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90"
+            title="Copies LinkedIn + X + image URL to clipboard and opens Postiz composer in a new tab"
           >
-            Edit &amp; schedule
+            Copy &amp; open in Postiz ↗
           </button>
           <button
+            onClick={() => onCopyOne(draft.linkedinBody, 'LinkedIn')}
+            className="px-[12px] py-[8px] bg-newBgLineColor text-newTextColor rounded-[8px] text-[12px] hover:opacity-90"
+          >
+            Copy LinkedIn
+          </button>
+          <button
+            onClick={() => onCopyOne(draft.xBody, 'X')}
+            className="px-[12px] py-[8px] bg-newBgLineColor text-newTextColor rounded-[8px] text-[12px] hover:opacity-90"
+          >
+            Copy X
+          </button>
+          <button
+            onClick={() => onShip(draft.id)}
+            className="px-[14px] py-[8px] bg-green-900/40 text-green-300 rounded-[8px] text-[12px] hover:bg-green-900/60"
+            title="Mark this draft as shipped (after you've scheduled it in Postiz). Moves it to History."
+          >
+            ✓ Mark as shipped
+          </button>
+          <div className="flex-1" />
+          <button
             onClick={() => onRegenerate(draft.id)}
-            className="px-[16px] py-[8px] bg-newBgLineColor text-newTextColor rounded-[8px] text-[13px] hover:opacity-90"
+            className="px-[12px] py-[8px] text-textItemBlur rounded-[8px] text-[12px] hover:text-newTextColor"
           >
             Regenerate
           </button>
           <button
             onClick={() => onSkip(draft.id)}
-            className="px-[16px] py-[8px] text-textItemBlur rounded-[8px] text-[13px] hover:text-newTextColor"
+            className="px-[12px] py-[8px] text-textItemBlur rounded-[8px] text-[12px] hover:text-red-300"
           >
             Skip
           </button>

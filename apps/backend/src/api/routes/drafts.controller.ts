@@ -201,11 +201,15 @@ export class DraftsController {
     return { ok: true };
   }
 
-  @Post('/:id/launch')
-  async launch(
+  @Post('/:id/ship')
+  async ship(
     @GetOrgFromRequest() _org: Organization,
-    @Param('id') _id: string
-  ): Promise<{ postId: string }> {
-    return { postId: 'PHASE-3-V2-PENDING' };
+    @Param('id') id: string
+  ): Promise<{ ok: true }> {
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE news."NewsDraft" SET status = 'shipped', "shippedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1`,
+      id
+    );
+    return { ok: true };
   }
 }
