@@ -72,31 +72,22 @@ export const DraftsComponent: FC = () => {
   const fetch = useFetch();
 
   const onCopyAndOpen = useCallback(async (draft: DraftRow) => {
-    const imgs = (draft.metadata?.images && draft.metadata.images.length > 0)
-      ? draft.metadata.images
-      : (draft.imageUrl ? [draft.imageUrl] : []);
-    const tags = draft.metadata?.suggestedTags || [];
-    const lines = [
-      draft.linkedinBody,
-      '',
-      '--- X (Arabic) ---',
-      draft.xBody,
-    ];
-    if (imgs.length > 0) {
-      lines.push('', `--- Images (${imgs.length}) ---`, ...imgs);
+    // One-click: create a real Postiz draft Post via PostsService, then
+    // drop the user in their native composer for that post.
+    const res = await fetch(`/drafts/${draft.id}/launch`, { method: 'POST' });
+    const json = (await res.json()) as { ok: boolean; groupId?: string; postIds?: string[]; message?: string };
+    if (!json.ok) {
+      setToast(json.message || 'Launch failed.');
+      setTimeout(() => setToast(null), 5000);
+      return;
     }
-    if (tags.length > 0) {
-      lines.push('', `--- Suggested tags ---`, tags.join('   '));
-    }
-    try {
-      await navigator.clipboard.writeText(lines.join('\n'));
-      setToast('Copied LinkedIn + X + images + suggested tags to clipboard. Opening Postiz composer...');
-    } catch {
-      setToast('Clipboard blocked by browser. Open the draft body manually.');
-    }
-    setTimeout(() => setToast(null), 5000);
-    window.open('/launches', '_blank');
-  }, []);
+    setToast('Created in Postiz. Opening composer...');
+    setTimeout(() => setToast(null), 3000);
+    void mutate();
+    // Land on the calendar; Postiz surfaces the new draft post there.
+    const url = json.groupId ? `/launches?group=${json.groupId}` : '/launches';
+    window.location.href = url;
+  }, [fetch, mutate]);
 
   const onCopyOne = useCallback(async (text: string, label: string) => {
     try {
@@ -668,9 +659,9 @@ const DraftCard: FC<{
           <button
             onClick={() => onCopyAndOpen(draft)}
             className="px-[16px] py-[8px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90"
-            title="Copies LinkedIn + X + image URL to clipboard and opens Postiz composer in a new tab"
+            title="Creates a draft post in Postiz with LinkedIn + X + images attached, then opens it"
           >
-            Copy &amp; open in Postiz ↗
+            Send to Postiz ↗
           </button>
           <button
             onClick={startEdit}

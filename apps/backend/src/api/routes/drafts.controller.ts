@@ -17,6 +17,8 @@ import { Organization } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { ApiTags } from '@nestjs/swagger';
 import { PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 
 interface DraftRow {
   id: string;
@@ -44,7 +46,11 @@ function enrichDraft(r: any): DraftRow {
 export class DraftsController {
   private readonly logger = new Logger(DraftsController.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private postsService: PostsService,
+    private integrationService: IntegrationService,
+  ) {}
 
   // Audit log helper. Reads the current draft row and inserts a history row
   // with the given action. Best-effort: never throws back up to the caller.
@@ -286,6 +292,112 @@ export class DraftsController {
     } catch (err) {
       this.logger.warn(`drafts/generate failed: ${(err as Error).message}`);
       return { queued: 0, nextRunWithinMinutes: 10 };
+    }
+  }
+
+  /**
+   * Create a real Postiz Post (state=DRAFT) from this draft so the user
+   * lands in Postiz's native composer with text + images + channels
+   * already populated. One-click flow, no clipboard.
+   *
+   * Returns { groupId } so the UI can redirect to /launches?group=<id>
+   * where Postiz's calendar will surface the new draft.
+   */
+  @Post('/:id/launch')
+  async launch(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ): Promise<{ ok: boolean; groupId?: string; postIds?: string[]; message?: string }> {
+    try {
+      // Fetch the draft
+      const rows = await this.prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT "linkedinBody", "xBody", "imageUrl", metadata FROM news."NewsDraft" WHERE id = $1 LIMIT 1`,
+        id
+      );
+      const draft = rows[0];
+      if (!draft) return { ok: false, message: 'Draft not found' };
+      const images: string[] = Array.isArray(draft?.metadata?.images) ? draft.metadata.images : (draft.imageUrl ? [draft.imageUrl] : []);
+
+      // Find the user's connected LinkedIn + X integrations
+      const integrations = await this.integrationService.getIntegrationsList(org.id);
+      const linkedinInt = integrations.find((i: any) => i.providerIdentifier === 'linkedin' || i.providerIdentifier === 'linkedin-v2' || i.providerIdentifier === 'linkedin-page');
+      const xInt = integrations.find((i: any) => i.providerIdentifier === 'x');
+
+      if (!linkedinInt && !xInt) {
+        return { ok: false, message: 'No LinkedIn or X integration connected to your Postiz organization. Connect them in Integrations first.' };
+      }
+
+      // Register each image URL as a Media row so Postiz accepts it
+      const mediaRefs: Array<{ id: string; path: string; alt: string }> = [];
+      for (const url of images.slice(0, 4)) {
+        try {
+          const mediaId = `dft_media_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          await this.prisma.$executeRawUnsafe(
+            `INSERT INTO "Media" (id, name, path, "organizationId", "createdAt", "updatedAt")
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING`,
+            mediaId, url.split('/').pop() || 'draft-image.jpg', url, org.id
+          );
+          mediaRefs.push({ id: mediaId, path: url, alt: '' });
+        } catch (err) {
+          this.logger.warn(`launch: media insert skipped: ${(err as Error).message}`);
+        }
+      }
+
+      // Build the per-provider post payloads
+      const posts: any[] = [];
+      const imagesField = mediaRefs.length > 0 ? mediaRefs : undefined;
+      if (linkedinInt && draft.linkedinBody) {
+        posts.push({
+          integration: { id: linkedinInt.id },
+          value: [{ content: draft.linkedinBody, image: imagesField }],
+          settings: {},
+        });
+      }
+      if (xInt && draft.xBody) {
+        posts.push({
+          integration: { id: xInt.id },
+          value: [{ content: draft.xBody, image: imagesField }],
+          settings: {},
+        });
+      }
+      if (posts.length === 0) return { ok: false, message: 'Nothing to post' };
+
+      // Create via Postiz's PostsService — state=draft so the user lands
+      // in the composer to pick a time and hit Schedule themselves.
+      const created = await this.postsService.createPost(org.id, {
+        type: 'draft',
+        date: new Date(Date.now() + 24 * 3600_000).toISOString(),
+        tags: [],
+        posts,
+        order: '',
+        shortLink: false,
+        inter: false,
+      } as any);
+      const postIds = (created || []).map((r: any) => r.postId);
+      const firstPost = postIds[0];
+
+      // Look up the group id so we can redirect to it
+      let groupId = '';
+      if (firstPost) {
+        const groupRows = await this.prisma.$queryRawUnsafe<Array<{ group: string }>>(
+          `SELECT "group" FROM "Post" WHERE id = $1 LIMIT 1`,
+          firstPost
+        );
+        groupId = groupRows[0]?.group || '';
+      }
+
+      // Update the draft with the Postiz post ref + ship-status
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE news."NewsDraft" SET "postizPostId" = $1, status = 'launched', "updatedAt" = NOW() WHERE id = $2`,
+        firstPost || null, id
+      );
+      await this.snapshotDraft(id, 'launched', `Postiz group=${groupId}, posts=${postIds.length}`);
+
+      return { ok: true, groupId, postIds };
+    } catch (err) {
+      this.logger.error(`drafts/launch failed: ${(err as Error).message}\n${(err as Error).stack}`);
+      return { ok: false, message: (err as Error).message };
     }
   }
 
