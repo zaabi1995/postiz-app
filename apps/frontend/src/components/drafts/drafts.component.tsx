@@ -97,6 +97,23 @@ export const DraftsComponent: FC = () => {
     void mutate();
   }, [fetch, mutate]);
 
+  const onSetImage = useCallback(async (draftId: string, body: { url?: string; dataUrl?: string }) => {
+    const res = await fetch(`/drafts/${draftId}/image`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json()) as { ok: boolean; message?: string };
+    if (json.ok) {
+      setToast('Image updated.');
+    } else {
+      setToast(json.message || 'Image update failed.');
+    }
+    setTimeout(() => setToast(null), 4000);
+    void mutate();
+    return json.ok;
+  }, [fetch, mutate]);
+
   const onSaveEdit = useCallback(async (draftId: string, linkedinBody: string, xBody: string) => {
     const res = await fetch(`/drafts/${draftId}/update`, {
       method: 'POST',
@@ -291,6 +308,7 @@ export const DraftsComponent: FC = () => {
             onSkip={onSkip}
             onRegenerate={onRegenerate}
             onSaveEdit={onSaveEdit}
+            onSetImage={onSetImage}
           />
         ))}
       </div>
@@ -307,11 +325,39 @@ const DraftCard: FC<{
   onSkip: (id: string) => void;
   onRegenerate: (id: string) => void;
   onSaveEdit: (id: string, linkedin: string, x: string) => Promise<boolean>;
-}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit }) => {
+  onSetImage: (id: string, body: { url?: string; dataUrl?: string }) => Promise<boolean>;
+}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit, onSetImage }) => {
   const [editing, setEditing] = useState(false);
   const [editLi, setEditLi] = useState(draft.linkedinBody);
   const [editX, setEditX] = useState(draft.xBody);
   const [saving, setSaving] = useState(false);
+  const [showImagePanel, setShowImagePanel] = useState(false);
+  const [imageUrlInput, setImageUrlInput] = useState('');
+  const [uploadingImage, setUploadingImage] = useState(false);
+
+  const onPickFile = async (file: File) => {
+    if (!file) return;
+    setUploadingImage(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = String(reader.result || '');
+      await onSetImage(draft.id, { dataUrl });
+      setUploadingImage(false);
+      setShowImagePanel(false);
+    };
+    reader.onerror = () => setUploadingImage(false);
+    reader.readAsDataURL(file);
+  };
+  const onApplyUrl = async () => {
+    if (!imageUrlInput.trim()) return;
+    setUploadingImage(true);
+    const ok = await onSetImage(draft.id, { url: imageUrlInput.trim() });
+    setUploadingImage(false);
+    if (ok) {
+      setImageUrlInput('');
+      setShowImagePanel(false);
+    }
+  };
 
   const startEdit = () => {
     setEditLi(draft.linkedinBody);
@@ -372,16 +418,59 @@ const DraftCard: FC<{
             </>
           )}
         </div>
-        {draft.imageUrl && (
-          <div className="flex flex-col gap-[6px]">
+        <div className="flex flex-col gap-[6px]">
+          <div className="flex items-center justify-between">
             <div className="text-[11px] text-textItemBlur uppercase tracking-wide">Cover image</div>
+            {mode === 'pending' && (
+              <button
+                onClick={() => setShowImagePanel((v) => !v)}
+                className="text-[11px] text-textItemBlur hover:text-newTextColor"
+              >
+                {showImagePanel ? 'Close' : 'Change'}
+              </button>
+            )}
+          </div>
+          {draft.imageUrl ? (
             <img
               src={draft.imageUrl}
               alt="Cover preview"
               className="w-full rounded-[8px] border border-blockSeparator"
             />
-          </div>
-        )}
+          ) : (
+            <div className="w-full h-[160px] rounded-[8px] border border-dashed border-blockSeparator flex items-center justify-center text-[11px] text-textItemBlur">
+              No cover image
+            </div>
+          )}
+          {showImagePanel && mode === 'pending' && (
+            <div className="bg-newBgColorInner rounded-[6px] p-[10px] flex flex-col gap-[8px]">
+              <input
+                type="url"
+                value={imageUrlInput}
+                onChange={(e) => setImageUrlInput(e.target.value)}
+                placeholder="Paste image URL"
+                className="w-full px-[8px] py-[6px] bg-newBgColor border border-blockSeparator rounded-[6px] text-[12px] text-newTextColor"
+              />
+              <button
+                onClick={onApplyUrl}
+                disabled={uploadingImage || !imageUrlInput.trim()}
+                className="px-[10px] py-[6px] bg-newButtonColor text-newTextColor rounded-[6px] text-[12px] disabled:opacity-50"
+              >
+                {uploadingImage ? 'Working...' : 'Use this URL'}
+              </button>
+              <div className="text-[10px] text-textItemBlur text-center">or</div>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void onPickFile(f);
+                }}
+                disabled={uploadingImage}
+                className="text-[11px] text-textItemBlur"
+              />
+            </div>
+          )}
+        </div>
       </div>
 
       {mode === 'pending' && !editing && (

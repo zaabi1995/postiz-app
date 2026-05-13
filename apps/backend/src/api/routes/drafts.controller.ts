@@ -230,6 +230,60 @@ export class DraftsController {
     return { ok: true };
   }
 
+  @Post('/:id/image')
+  async setImage(
+    @GetOrgFromRequest() _org: Organization,
+    @Param('id') id: string,
+    @Body() body: { url?: string; dataUrl?: string }
+  ): Promise<{ ok: boolean; imageUrl?: string; message?: string }> {
+    const url = (body?.url || '').trim();
+    const dataUrl = (body?.dataUrl || '').trim();
+    if (!url && !dataUrl) {
+      return { ok: false, message: 'Provide a url or dataUrl' };
+    }
+    try {
+      let buf: Buffer;
+      let ext = 'jpg';
+      if (dataUrl) {
+        const m = dataUrl.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/i);
+        if (!m) return { ok: false, message: 'Invalid dataUrl (need data:image/{png,jpg,webp};base64,...)' };
+        ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+        buf = Buffer.from(m[2], 'base64');
+        if (buf.length > 10 * 1024 * 1024) {
+          return { ok: false, message: 'Image > 10 MB. Compress before upload.' };
+        }
+      } else {
+        const res = await fetch(url, { redirect: 'follow' });
+        if (!res.ok) return { ok: false, message: `Fetch ${res.status} from URL` };
+        buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 10 * 1024 * 1024) {
+          return { ok: false, message: 'Image > 10 MB. Try a smaller one.' };
+        }
+        const ct = (res.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('png')) ext = 'png';
+        else if (ct.includes('webp')) ext = 'webp';
+        else ext = 'jpg';
+      }
+      const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
+      const { resolve } = await import('node:path');
+      const day = new Date().toISOString().slice(0, 10);
+      const dir = `/uploads/drafts/${day}`;
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const fileName = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      const filePath = resolve(dir, fileName);
+      writeFileSync(filePath, buf);
+      const publicUrl = `https://social.alizaabi.om/uploads/drafts/${day}/${fileName}`;
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE news."NewsDraft" SET "imageUrl" = $1, "aliEdited" = true, "updatedAt" = NOW() WHERE id = $2`,
+        publicUrl, id
+      );
+      return { ok: true, imageUrl: publicUrl };
+    } catch (err) {
+      this.logger.error(`drafts/:id/image failed: ${(err as Error).message}`);
+      return { ok: false, message: (err as Error).message };
+    }
+  }
+
   @Post('/:id/ship')
   async ship(
     @GetOrgFromRequest() _org: Organization,
