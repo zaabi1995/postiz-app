@@ -97,6 +97,23 @@ export const DraftsComponent: FC = () => {
     void mutate();
   }, [fetch, mutate]);
 
+  const onSaveEdit = useCallback(async (draftId: string, linkedinBody: string, xBody: string) => {
+    const res = await fetch(`/drafts/${draftId}/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ linkedinBody, xBody }),
+    });
+    const json = (await res.json()) as { ok: boolean; message?: string };
+    if (json.ok) {
+      setToast('Saved your edits. The system learns from edited drafts.');
+    } else {
+      setToast(json.message || 'Save failed.');
+    }
+    setTimeout(() => setToast(null), 4000);
+    void mutate();
+    return json.ok;
+  }, [fetch, mutate]);
+
   const onSkip = useCallback(async (draftId: string) => {
     await fetch(`/drafts/${draftId}/skip`, { method: 'POST' });
     void mutate();
@@ -273,6 +290,7 @@ export const DraftsComponent: FC = () => {
             onShip={onShip}
             onSkip={onSkip}
             onRegenerate={onRegenerate}
+            onSaveEdit={onSaveEdit}
           />
         ))}
       </div>
@@ -288,7 +306,28 @@ const DraftCard: FC<{
   onShip: (id: string) => void;
   onSkip: (id: string) => void;
   onRegenerate: (id: string) => void;
-}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate }) => {
+  onSaveEdit: (id: string, linkedin: string, x: string) => Promise<boolean>;
+}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit }) => {
+  const [editing, setEditing] = useState(false);
+  const [editLi, setEditLi] = useState(draft.linkedinBody);
+  const [editX, setEditX] = useState(draft.xBody);
+  const [saving, setSaving] = useState(false);
+
+  const startEdit = () => {
+    setEditLi(draft.linkedinBody);
+    setEditX(draft.xBody);
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+  };
+  const save = async () => {
+    setSaving(true);
+    const ok = await onSaveEdit(draft.id, editLi, editX);
+    setSaving(false);
+    if (ok) setEditing(false);
+  };
+
   return (
     <div className="bg-newBgColor rounded-[12px] border border-blockSeparator p-[20px] flex flex-col gap-[16px]">
       <div className="flex items-start gap-[12px]">
@@ -321,8 +360,17 @@ const DraftCard: FC<{
 
       <div className="grid grid-cols-1 md:grid-cols-[1fr_280px] gap-[16px]">
         <div className="flex flex-col gap-[12px]">
-          <DraftPreview label="LinkedIn (bilingual)" body={draft.linkedinBody} maxChars={1500} />
-          <DraftPreview label="X (Arabic)" body={draft.xBody} maxChars={280} rtl />
+          {editing ? (
+            <>
+              <DraftEditor label="LinkedIn (bilingual)" value={editLi} onChange={setEditLi} maxChars={1500} rows={10} />
+              <DraftEditor label="X (Arabic)" value={editX} onChange={setEditX} maxChars={280} rtl rows={4} />
+            </>
+          ) : (
+            <>
+              <DraftPreview label="LinkedIn (bilingual)" body={draft.linkedinBody} maxChars={1500} />
+              <DraftPreview label="X (Arabic)" body={draft.xBody} maxChars={280} rtl />
+            </>
+          )}
         </div>
         {draft.imageUrl && (
           <div className="flex flex-col gap-[6px]">
@@ -336,7 +384,7 @@ const DraftCard: FC<{
         )}
       </div>
 
-      {mode === 'pending' && (
+      {mode === 'pending' && !editing && (
         <div className="flex gap-[8px] flex-wrap">
           <button
             onClick={() => onCopyAndOpen(draft)}
@@ -344,6 +392,12 @@ const DraftCard: FC<{
             title="Copies LinkedIn + X + image URL to clipboard and opens Postiz composer in a new tab"
           >
             Copy &amp; open in Postiz ↗
+          </button>
+          <button
+            onClick={startEdit}
+            className="px-[14px] py-[8px] bg-newBgLineColor text-newTextColor rounded-[8px] text-[12px] hover:opacity-90"
+          >
+            ✎ Edit
           </button>
           <button
             onClick={() => onCopyOne(draft.linkedinBody, 'LinkedIn')}
@@ -379,6 +433,56 @@ const DraftCard: FC<{
           </button>
         </div>
       )}
+
+      {mode === 'pending' && editing && (
+        <div className="flex gap-[8px]">
+          <button
+            onClick={save}
+            disabled={saving}
+            className="px-[16px] py-[8px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90 disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save edits'}
+          </button>
+          <button
+            onClick={cancelEdit}
+            className="px-[14px] py-[8px] text-textItemBlur rounded-[8px] text-[12px] hover:text-newTextColor"
+          >
+            Cancel
+          </button>
+          <div className="flex-1 text-[11px] text-textItemBlur self-center">
+            Your edits become positive training signal. The system learns what shape you ship vs reject.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const DraftEditor: FC<{
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  maxChars?: number;
+  rtl?: boolean;
+  rows?: number;
+}> = ({ label, value, onChange, maxChars, rtl, rows = 6 }) => {
+  const len = value.length;
+  const overLimit = maxChars && len > maxChars;
+  return (
+    <div className="bg-newBgColorInner rounded-[8px] p-[12px]">
+      <div className="flex items-center gap-[8px] mb-[8px]">
+        <div className="text-[11px] font-[600] uppercase tracking-wide text-textItemBlur">{label}</div>
+        <div className={`text-[11px] ${overLimit ? 'text-red-400' : 'text-textItemBlur'}`}>
+          {len} chars{maxChars ? ` / ${maxChars}` : ''}
+        </div>
+      </div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        dir={rtl ? 'rtl' : 'auto'}
+        className="w-full px-[10px] py-[8px] bg-newBgColor border border-blockSeparator rounded-[6px] text-[13px] text-newTextColor leading-[1.6] resize-y"
+      />
     </div>
   );
 };

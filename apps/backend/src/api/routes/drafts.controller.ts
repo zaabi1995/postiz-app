@@ -201,6 +201,35 @@ export class DraftsController {
     return { ok: true };
   }
 
+  @Post('/:id/update')
+  async update(
+    @GetOrgFromRequest() _org: Organization,
+    @Param('id') id: string,
+    @Body() body: { linkedinBody?: string; xBody?: string }
+  ): Promise<{ ok: boolean; message?: string }> {
+    const linkedinBody = (body?.linkedinBody || '').trim();
+    const xBody = (body?.xBody || '').trim();
+    if (!linkedinBody || !xBody) {
+      return { ok: false, message: 'Both linkedinBody and xBody are required.' };
+    }
+    if (linkedinBody.length > 2000 || xBody.length > 400) {
+      return { ok: false, message: 'Body too long.' };
+    }
+    if (linkedinBody.includes('—') || xBody.includes('—')) {
+      return { ok: false, message: 'Em-dashes are banned. Use commas/periods/parens instead.' };
+    }
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE news."NewsDraft"
+         SET "linkedinBody" = $1,
+             "xBody" = $2,
+             "aliEdited" = true,
+             "updatedAt" = NOW()
+       WHERE id = $3`,
+      linkedinBody, xBody, id
+    );
+    return { ok: true };
+  }
+
   @Post('/:id/ship')
   async ship(
     @GetOrgFromRequest() _org: Organization,
