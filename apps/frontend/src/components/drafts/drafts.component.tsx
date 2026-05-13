@@ -63,6 +63,7 @@ export const DraftsComponent: FC = () => {
   const [showRules, setShowRules] = useState(false);
   const [showCompose, setShowCompose] = useState(false);
   const [composePrompt, setComposePrompt] = useState('');
+  const [composeImages, setComposeImages] = useState<Array<{ dataUrl: string; name: string }>>([]);
   const [composing, setComposing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -139,6 +140,25 @@ export const DraftsComponent: FC = () => {
     void mutate();
   }, [fetch, mutate]);
 
+  const onFetchHistory = useCallback(async (draftId: string) => {
+    const res = await fetch(`/drafts/${draftId}/history`);
+    const json = (await res.json()) as { versions: any[] };
+    return json.versions || [];
+  }, [fetch]);
+
+  const onRestoreVersion = useCallback(async (draftId: string, versionId: string) => {
+    const res = await fetch(`/drafts/${draftId}/restore/${versionId}`, { method: 'POST' });
+    const json = (await res.json()) as { ok: boolean; message?: string };
+    if (json.ok) {
+      setToast('Version restored.');
+      void mutate();
+    } else {
+      setToast(json.message || 'Restore failed');
+    }
+    setTimeout(() => setToast(null), 4000);
+    return json.ok;
+  }, [fetch, mutate]);
+
   const onSaveEdit = useCallback(async (draftId: string, linkedinBody: string, xBody: string) => {
     const res = await fetch(`/drafts/${draftId}/update`, {
       method: 'POST',
@@ -177,19 +197,47 @@ export const DraftsComponent: FC = () => {
       const res = await fetch('/drafts/compose', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: composePrompt.trim() }),
+        body: JSON.stringify({
+          prompt: composePrompt.trim(),
+          images: composeImages.map((i) => ({ dataUrl: i.dataUrl })),
+        }),
       });
       const json = (await res.json()) as { ok: boolean; message: string };
       setToast(json.message);
       if (json.ok) {
         setComposePrompt('');
+        setComposeImages([]);
         setShowCompose(false);
       }
       setTimeout(() => setToast(null), 6000);
     } finally {
       setComposing(false);
     }
-  }, [fetch, composePrompt]);
+  }, [fetch, composePrompt, composeImages]);
+
+  const onComposePickFiles = useCallback((files: FileList | null) => {
+    if (!files) return;
+    const remaining = 4 - composeImages.length;
+    const toRead = Array.from(files).slice(0, Math.max(0, remaining));
+    if (toRead.length === 0) return;
+    toRead.forEach((f) => {
+      if (!f.type.startsWith('image/')) return;
+      if (f.size > 10 * 1024 * 1024) {
+        setToast(`${f.name} is over 10 MB. Skipped.`);
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        setComposeImages((prev) => prev.length >= 4 ? prev : [...prev, { dataUrl: String(reader.result || ''), name: f.name }]);
+      };
+      reader.readAsDataURL(f);
+    });
+  }, [composeImages]);
+
+  const onComposeRemoveImage = useCallback((idx: number) => {
+    setComposeImages((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
 
   const onGenerate = useCallback(async () => {
     setGenerating(true);
@@ -251,16 +299,61 @@ export const DraftsComponent: FC = () => {
               rows={5}
               className="w-full px-[12px] py-[10px] bg-newBgColorInner border border-blockSeparator rounded-[8px] text-[14px] text-newTextColor resize-y"
             />
+
+            {/* Photo dropzone */}
+            <div
+              className="mt-[10px] border border-dashed border-blockSeparator rounded-[8px] p-[12px] bg-newBgColorInner"
+              onDragOver={(e) => { e.preventDefault(); }}
+              onDrop={(e) => {
+                e.preventDefault();
+                onComposePickFiles(e.dataTransfer.files);
+              }}
+            >
+              <div className="text-[11px] text-textItemBlur mb-[8px] flex items-center justify-between">
+                <span>Photos for AI to read ({composeImages.length}/4) — drag here or pick. Claude sees them and weaves details into the post.</span>
+                <label className="text-newTextColor cursor-pointer hover:underline">
+                  + Pick
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(e) => onComposePickFiles(e.target.files)}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+              {composeImages.length > 0 && (
+                <div className="grid grid-cols-4 gap-[6px]">
+                  {composeImages.map((img, idx) => (
+                    <div key={img.dataUrl.slice(0, 30) + idx} className="relative group">
+                      <img
+                        src={img.dataUrl}
+                        alt={img.name}
+                        className="w-full aspect-square object-cover rounded-[6px] border border-blockSeparator"
+                      />
+                      <button
+                        onClick={() => onComposeRemoveImage(idx)}
+                        className="absolute top-[2px] right-[2px] w-[18px] h-[18px] bg-black/70 text-white rounded-full text-[10px] leading-none hover:bg-red-700"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="flex items-center justify-between mt-[10px]">
               <div className="text-[11px] text-textItemBlur">
                 {composePrompt.length} chars{composePrompt.length < 15 && composePrompt.length > 0 ? ' (need ≥15)' : ''}
+                {composeImages.length > 0 && ` · ${composeImages.length} photo${composeImages.length > 1 ? 's' : ''}`}
               </div>
               <button
                 onClick={onCompose}
                 disabled={composing || composePrompt.trim().length < 15}
                 className="px-[18px] py-[8px] bg-newButtonColor text-newTextColor rounded-[8px] text-[13px] font-[600] hover:opacity-90 disabled:opacity-50"
               >
-                {composing ? 'Queuing...' : 'Draft this'}
+                {composing ? 'Queuing...' : composeImages.length > 0 ? `Draft with ${composeImages.length} photo${composeImages.length > 1 ? 's' : ''}` : 'Draft this'}
               </button>
             </div>
           </div>
@@ -335,6 +428,8 @@ export const DraftsComponent: FC = () => {
             onSaveEdit={onSaveEdit}
             onSetImage={onSetImage}
             onDeleteImage={onDeleteImage}
+            onFetchHistory={onFetchHistory}
+            onRestoreVersion={onRestoreVersion}
           />
         ))}
       </div>
@@ -353,7 +448,9 @@ const DraftCard: FC<{
   onSaveEdit: (id: string, linkedin: string, x: string) => Promise<boolean>;
   onSetImage: (id: string, body: { url?: string; dataUrl?: string; replace?: boolean }) => Promise<boolean>;
   onDeleteImage: (id: string, index: number) => Promise<void>;
-}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit, onSetImage, onDeleteImage }) => {
+  onFetchHistory: (id: string) => Promise<any[]>;
+  onRestoreVersion: (id: string, versionId: string) => Promise<boolean>;
+}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit, onSetImage, onDeleteImage, onFetchHistory, onRestoreVersion }) => {
   const [editing, setEditing] = useState(false);
   const [editLi, setEditLi] = useState(draft.linkedinBody);
   const [editX, setEditX] = useState(draft.xBody);
@@ -361,6 +458,24 @@ const DraftCard: FC<{
   const [showImagePanel, setShowImagePanel] = useState(false);
   const [imageUrlInput, setImageUrlInput] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyRows, setHistoryRows] = useState<any[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  const openHistory = async () => {
+    setShowHistory(true);
+    setLoadingHistory(true);
+    const rows = await onFetchHistory(draft.id);
+    setHistoryRows(rows);
+    setLoadingHistory(false);
+  };
+  const restoreVersion = async (versionId: string) => {
+    const ok = await onRestoreVersion(draft.id, versionId);
+    if (ok) {
+      const rows = await onFetchHistory(draft.id);
+      setHistoryRows(rows);
+    }
+  };
 
   const images: string[] = (draft.metadata?.images && draft.metadata.images.length > 0)
     ? draft.metadata.images
@@ -595,6 +710,65 @@ const DraftCard: FC<{
           >
             Skip
           </button>
+          <button
+            onClick={openHistory}
+            className="px-[12px] py-[8px] text-textItemBlur rounded-[8px] text-[12px] hover:text-newTextColor"
+            title="See every previous version of this draft, restore any"
+          >
+            ⟲ History
+          </button>
+        </div>
+      )}
+
+      {showHistory && (
+        <div className="bg-newBgColorInner rounded-[8px] p-[12px] mt-[8px]">
+          <div className="flex items-center justify-between mb-[10px]">
+            <div className="text-[12px] font-[600] uppercase tracking-wide text-newTextColor">Version history</div>
+            <button
+              onClick={() => setShowHistory(false)}
+              className="text-[11px] text-textItemBlur hover:text-newTextColor"
+            >
+              Close
+            </button>
+          </div>
+          {loadingHistory && <div className="text-[12px] text-textItemBlur">Loading...</div>}
+          {!loadingHistory && historyRows.length === 0 && (
+            <div className="text-[12px] text-textItemBlur">No history yet (this draft was just created).</div>
+          )}
+          {!loadingHistory && historyRows.length > 0 && (
+            <div className="flex flex-col gap-[8px] max-h-[400px] overflow-y-auto">
+              {historyRows.map((v) => (
+                <div key={v.id} className="bg-newBgColor border border-blockSeparator rounded-[6px] p-[10px] flex items-start gap-[10px]">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-[6px] mb-[4px]">
+                      <span className={`text-[10px] font-[600] uppercase tracking-wide px-[6px] py-[2px] rounded-[4px] ${
+                        v.action === 'edited' ? 'bg-yellow-900/40 text-yellow-300' :
+                        v.action === 'shipped' ? 'bg-green-900/40 text-green-300' :
+                        v.action === 'skipped' ? 'bg-red-900/40 text-red-300' :
+                        v.action === 'restored' ? 'bg-blue-900/40 text-blue-300' :
+                        'bg-newBgLineColor text-textItemBlur'
+                      }`}>
+                        {v.action}
+                      </span>
+                      <span className="text-[10px] text-textItemBlur">{new Date(v.snapshotAt).toLocaleString()}</span>
+                    </div>
+                    <div className="text-[11px] text-newTextColor whitespace-pre-wrap line-clamp-3 leading-[1.5]" style={{display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden'}}>
+                      {v.linkedinBody?.slice(0, 250) || '(no body)'}
+                    </div>
+                    {v.notes && (
+                      <div className="text-[10px] text-textItemBlur mt-[2px] italic">{v.notes}</div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => restoreVersion(v.id)}
+                    className="px-[10px] py-[5px] bg-newBgLineColor text-newTextColor rounded-[6px] text-[11px] hover:opacity-90 whitespace-nowrap"
+                  >
+                    Restore
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

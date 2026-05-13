@@ -46,6 +46,29 @@ export class DraftsController {
 
   constructor(private prisma: PrismaService) {}
 
+  // Audit log helper. Reads the current draft row and inserts a history row
+  // with the given action. Best-effort: never throws back up to the caller.
+  private async snapshotDraft(draftId: string, action: string, notes?: string): Promise<void> {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT "linkedinBody", "xBody", "imageUrl", status, metadata FROM news."NewsDraft" WHERE id = $1 LIMIT 1`,
+        draftId
+      );
+      const r = rows[0];
+      if (!r) return;
+      const histId = `hist_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO news."NewsDraftHistory"
+           (id, "draftId", action, "linkedinBody", "xBody", "imageUrl", status, metadata, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)`,
+        histId, draftId, action, r.linkedinBody, r.xBody, r.imageUrl, r.status,
+        JSON.stringify(r.metadata || {}), notes || null
+      );
+    } catch (err) {
+      this.logger.warn(`snapshotDraft(${action}) failed: ${(err as Error).message}`);
+    }
+  }
+
   @Get('/list')
   async list(@GetOrgFromRequest() _org: Organization): Promise<{ drafts: DraftRow[] }> {
     try {
@@ -119,9 +142,10 @@ export class DraftsController {
   @Post('/compose')
   async compose(
     @GetOrgFromRequest() _org: Organization,
-    @Body() body: { prompt?: string }
+    @Body() body: { prompt?: string; images?: Array<{ url?: string; dataUrl?: string }> }
   ): Promise<{ ok: boolean; itemId?: string; message: string }> {
     const prompt = (body?.prompt || '').trim();
+    const incomingImages = Array.isArray(body?.images) ? body.images.slice(0, 4) : [];
     if (prompt.length < 15) {
       return { ok: false, message: 'Please type at least 15 characters describing what you want to post about.' };
     }
@@ -133,9 +157,43 @@ export class DraftsController {
       const id = `manual_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const title = prompt.slice(0, 120).replace(/\s+/g, ' ');
       const urlPlaceholder = `urn:manual:${id}`;
-      const urlHashFn = (s: string) => {
-        // simple sha1-ish for unique constraint; use prisma raw with md5
-        return s;
+
+      // Save attached photos first so we have URLs to store in metadata.
+      const preuploadedImages: string[] = [];
+      const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
+      const { resolve } = await import('node:path');
+      const day = new Date().toISOString().slice(0, 10);
+      const dir = `/uploads/drafts/${day}`;
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      for (const img of incomingImages) {
+        try {
+          let buf: Buffer; let ext = 'jpg';
+          if (img?.dataUrl) {
+            const m = img.dataUrl.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/i);
+            if (!m) continue;
+            ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+            buf = Buffer.from(m[2], 'base64');
+          } else if (img?.url) {
+            const r = await fetch(img.url, { redirect: 'follow' });
+            if (!r.ok) continue;
+            buf = Buffer.from(await r.arrayBuffer());
+            const ct = (r.headers.get('content-type') || '').toLowerCase();
+            ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg';
+          } else {
+            continue;
+          }
+          if (buf.length > 10 * 1024 * 1024) continue; // skip too-large
+          const fname = `compose-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+          writeFileSync(resolve(dir, fname), buf);
+          preuploadedImages.push(`https://social.alizaabi.om/uploads/drafts/${day}/${fname}`);
+        } catch (err) {
+          this.logger.warn(`compose: image upload skipped: ${(err as Error).message}`);
+        }
+      }
+
+      const metadata = {
+        kind: preuploadedImages.length > 0 ? 'manual-with-photos' : 'manual-compose',
+        preuploadedImages,
       };
 
       await this.prisma.$executeRawUnsafe(
@@ -143,17 +201,67 @@ export class DraftsController {
            (id, url, "urlHash", title, summary, content, source, category, "publishedAt", "fetchedAt", score, status, metadata)
          VALUES
            ($1, $2, MD5($2), $3, $4, $4, 'manual', 'manual', NOW(), NOW(), 5.0, 'priority', $5::jsonb)`,
-        id, urlPlaceholder, title, prompt, JSON.stringify({ kind: 'manual-compose' })
+        id, urlPlaceholder, title, prompt, JSON.stringify(metadata)
       );
 
+      const photoNote = preuploadedImages.length > 0 ? ` with ${preuploadedImages.length} photo${preuploadedImages.length > 1 ? 's' : ''}` : '';
       return {
         ok: true,
         itemId: id,
-        message: 'Queued. Your draft will appear here within ~10 minutes.',
+        message: `Queued${photoNote}. Your draft will appear here within ~10 minutes.`,
       };
     } catch (err) {
       this.logger.error(`drafts/compose failed: ${(err as Error).message}`);
       return { ok: false, message: `Failed to queue: ${(err as Error).message}` };
+    }
+  }
+
+  @Get('/:id/history')
+  async getHistory(
+    @GetOrgFromRequest() _org: Organization,
+    @Param('id') id: string
+  ): Promise<{ versions: any[] }> {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT id, "draftId", "snapshotAt", action, "linkedinBody", "xBody", "imageUrl", status, metadata, notes
+           FROM news."NewsDraftHistory"
+          WHERE "draftId" = $1
+          ORDER BY "snapshotAt" DESC
+          LIMIT 50`,
+        id
+      );
+      return { versions: rows as any[] };
+    } catch (err) {
+      this.logger.warn(`drafts/${id}/history failed: ${(err as Error).message}`);
+      return { versions: [] };
+    }
+  }
+
+  @Post('/:id/restore/:versionId')
+  async restoreVersion(
+    @GetOrgFromRequest() _org: Organization,
+    @Param('id') id: string,
+    @Param('versionId') versionId: string
+  ): Promise<{ ok: boolean; message?: string }> {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT "linkedinBody", "xBody", "imageUrl", metadata FROM news."NewsDraftHistory" WHERE id = $1 AND "draftId" = $2 LIMIT 1`,
+        versionId, id
+      );
+      const v = rows[0];
+      if (!v) return { ok: false, message: 'Version not found' };
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE news."NewsDraft"
+            SET "linkedinBody" = $1, "xBody" = $2, "imageUrl" = $3,
+                metadata = $4::jsonb, "aliEdited" = true, "updatedAt" = NOW()
+          WHERE id = $5`,
+        v.linkedinBody, v.xBody, v.imageUrl, JSON.stringify(v.metadata || {}), id
+      );
+      await this.snapshotDraft(id, 'restored', `restored from version ${versionId}`);
+      return { ok: true };
+    } catch (err) {
+      this.logger.error(`restoreVersion failed: ${(err as Error).message}`);
+      return { ok: false, message: (err as Error).message };
     }
   }
 
@@ -190,6 +298,7 @@ export class DraftsController {
       `UPDATE news."NewsDraft" SET status = 'skipped', "updatedAt" = NOW() WHERE id = $1`,
       id
     );
+    await this.snapshotDraft(id, 'skipped');
     return { ok: true };
   }
 
@@ -207,6 +316,7 @@ export class DraftsController {
       `UPDATE news."NewsDraft" SET status = 'regenerated', "updatedAt" = NOW() WHERE id = $1`,
       id
     );
+    await this.snapshotDraft(id, 'regenerated');
     return { ok: true };
   }
 
@@ -236,6 +346,7 @@ export class DraftsController {
        WHERE id = $3`,
       linkedinBody, xBody, id
     );
+    await this.snapshotDraft(id, 'edited');
     return { ok: true };
   }
 
@@ -276,6 +387,7 @@ export class DraftsController {
       `UPDATE news."NewsDraft" SET metadata = $1::jsonb, "imageUrl" = $2, "aliEdited" = true, "updatedAt" = NOW() WHERE id = $3`,
       JSON.stringify(newMeta), newPrimary, id
     );
+    await this.snapshotDraft(id, 'image_removed');
     return { ok: true, images: list };
   }
 
@@ -342,6 +454,7 @@ export class DraftsController {
         `UPDATE news."NewsDraft" SET "imageUrl" = $1, metadata = $2::jsonb, "aliEdited" = true, "updatedAt" = NOW() WHERE id = $3`,
         list[0], JSON.stringify(newMeta), id
       );
+      await this.snapshotDraft(id, body?.replace ? 'image_replaced' : 'image_added');
       return { ok: true, imageUrl: list[0], images: list };
     } catch (err) {
       this.logger.error(`drafts/:id/image failed: ${(err as Error).message}`);
@@ -358,6 +471,7 @@ export class DraftsController {
       `UPDATE news."NewsDraft" SET status = 'shipped', "shippedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1`,
       id
     );
+    await this.snapshotDraft(id, 'shipped');
     return { ok: true };
   }
 }
