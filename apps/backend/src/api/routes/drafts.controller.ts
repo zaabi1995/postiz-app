@@ -12,7 +12,7 @@
 //   Talks to our news.NewsDraft + news.NewsItem tables via raw SQL through the
 //   existing PrismaService. No modifications to Postiz's prisma schema.
 
-import { Controller, Get, Post, Body, Param, Query, Logger } from '@nestjs/common';
+import { Controller, Delete, Get, Post, Body, Param, Query, Logger } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { ApiTags } from '@nestjs/swagger';
@@ -30,6 +30,13 @@ interface DraftRow {
   sourceUrl: string;
   sourceName: string;
   category: string;
+  metadata?: { images?: string[]; suggestedTags?: string[] } | null;
+}
+
+function enrichDraft(r: any): DraftRow {
+  const images = Array.isArray(r?.metadata?.images) ? r.metadata.images : (r.imageUrl ? [r.imageUrl] : []);
+  const suggestedTags = Array.isArray(r?.metadata?.suggestedTags) ? r.metadata.suggestedTags : [];
+  return { ...r, metadata: { images, suggestedTags } };
 }
 
 @ApiTags('Drafts')
@@ -51,6 +58,7 @@ export class DraftsController {
            d."imageUrl",
            d.status,
            d."createdAt",
+           d.metadata       AS metadata,
            n.title          AS "sourceTitle",
            n.url            AS "sourceUrl",
            n.source         AS "sourceName",
@@ -61,7 +69,7 @@ export class DraftsController {
          ORDER BY d."createdAt" DESC
          LIMIT 50`
       );
-      return { drafts: rows };
+      return { drafts: rows.map(enrichDraft) };
     } catch (err) {
       this.logger.warn(`drafts/list query failed: ${(err as Error).message}`);
       return { drafts: [] };
@@ -89,6 +97,7 @@ export class DraftsController {
            d."imageUrl",
            d.status,
            d."createdAt",
+           d.metadata       AS metadata,
            n.title          AS "sourceTitle",
            n.url            AS "sourceUrl",
            n.source         AS "sourceName",
@@ -100,7 +109,7 @@ export class DraftsController {
          LIMIT 100`,
         ...params
       );
-      return { drafts: rows };
+      return { drafts: rows.map(enrichDraft) };
     } catch (err) {
       this.logger.warn(`drafts/history query failed: ${(err as Error).message}`);
       return { drafts: [] };
@@ -230,12 +239,52 @@ export class DraftsController {
     return { ok: true };
   }
 
+  @Get('/:id/images')
+  async getImages(
+    @GetOrgFromRequest() _org: Organization,
+    @Param('id') id: string
+  ): Promise<{ images: string[] }> {
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ imageUrl: string | null; metadata: any }>>(
+      `SELECT "imageUrl", metadata FROM news."NewsDraft" WHERE id = $1 LIMIT 1`,
+      id
+    );
+    const r = rows[0];
+    if (!r) return { images: [] };
+    const list = Array.isArray(r.metadata?.images) ? r.metadata.images : [];
+    if (list.length === 0 && r.imageUrl) return { images: [r.imageUrl] };
+    return { images: list };
+  }
+
+  @Delete('/:id/images/:index')
+  async deleteImage(
+    @GetOrgFromRequest() _org: Organization,
+    @Param('id') id: string,
+    @Param('index') indexStr: string
+  ): Promise<{ ok: boolean; images: string[] }> {
+    const idx = parseInt(indexStr, 10);
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ imageUrl: string | null; metadata: any }>>(
+      `SELECT "imageUrl", metadata FROM news."NewsDraft" WHERE id = $1 LIMIT 1`,
+      id
+    );
+    const r = rows[0];
+    if (!r) return { ok: false, images: [] };
+    let list = Array.isArray(r.metadata?.images) ? [...r.metadata.images] : (r.imageUrl ? [r.imageUrl] : []);
+    if (idx >= 0 && idx < list.length) list.splice(idx, 1);
+    const newMeta = { ...(r.metadata || {}), images: list };
+    const newPrimary = list[0] || null;
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE news."NewsDraft" SET metadata = $1::jsonb, "imageUrl" = $2, "aliEdited" = true, "updatedAt" = NOW() WHERE id = $3`,
+      JSON.stringify(newMeta), newPrimary, id
+    );
+    return { ok: true, images: list };
+  }
+
   @Post('/:id/image')
   async setImage(
     @GetOrgFromRequest() _org: Organization,
     @Param('id') id: string,
-    @Body() body: { url?: string; dataUrl?: string }
-  ): Promise<{ ok: boolean; imageUrl?: string; message?: string }> {
+    @Body() body: { url?: string; dataUrl?: string; replace?: boolean }
+  ): Promise<{ ok: boolean; imageUrl?: string; images?: string[]; message?: string }> {
     const url = (body?.url || '').trim();
     const dataUrl = (body?.dataUrl || '').trim();
     if (!url && !dataUrl) {
@@ -273,11 +322,27 @@ export class DraftsController {
       const filePath = resolve(dir, fileName);
       writeFileSync(filePath, buf);
       const publicUrl = `https://social.alizaabi.om/uploads/drafts/${day}/${fileName}`;
-      await this.prisma.$executeRawUnsafe(
-        `UPDATE news."NewsDraft" SET "imageUrl" = $1, "aliEdited" = true, "updatedAt" = NOW() WHERE id = $2`,
-        publicUrl, id
+      // Read current images, append (or replace), enforce max 4
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ imageUrl: string | null; metadata: any }>>(
+        `SELECT "imageUrl", metadata FROM news."NewsDraft" WHERE id = $1 LIMIT 1`,
+        id
       );
-      return { ok: true, imageUrl: publicUrl };
+      const r = rows[0];
+      let list: string[] = Array.isArray(r?.metadata?.images) ? [...r.metadata.images] : (r?.imageUrl ? [r.imageUrl] : []);
+      if (body?.replace) {
+        list = [publicUrl];
+      } else {
+        if (list.length >= 4) {
+          return { ok: false, message: 'Max 4 images per draft. Remove one first.', images: list };
+        }
+        list.push(publicUrl);
+      }
+      const newMeta = { ...(r?.metadata || {}), images: list };
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE news."NewsDraft" SET "imageUrl" = $1, metadata = $2::jsonb, "aliEdited" = true, "updatedAt" = NOW() WHERE id = $3`,
+        list[0], JSON.stringify(newMeta), id
+      );
+      return { ok: true, imageUrl: list[0], images: list };
     } catch (err) {
       this.logger.error(`drafts/:id/image failed: ${(err as Error).message}`);
       return { ok: false, message: (err as Error).message };

@@ -21,12 +21,13 @@ interface DraftRow {
   sourceTitle: string;
   sourceUrl: string;
   sourceName: string;
-  category: 'global-ai' | 'gcc-sovereign' | 'ai-security' | 'operator-pulse';
+  category: 'global-ai' | 'gcc-sovereign' | 'ai-security' | 'operator-pulse' | 'manual';
   linkedinBody: string;
   xBody: string;
   imageUrl: string | null;
   status: string;
   createdAt: string;
+  metadata?: { images?: string[]; suggestedTags?: string[] } | null;
 }
 
 interface DraftsResponse {
@@ -38,6 +39,7 @@ const categoryLabel: Record<DraftRow['category'], string> = {
   'gcc-sovereign': 'GCC / Sovereign',
   'ai-security': 'AI Security',
   'operator-pulse': 'Operator Pulse',
+  'manual': 'Your note',
 };
 
 const statusLabel: Record<string, string> = {
@@ -69,10 +71,25 @@ export const DraftsComponent: FC = () => {
   const fetch = useFetch();
 
   const onCopyAndOpen = useCallback(async (draft: DraftRow) => {
-    const blob = `${draft.linkedinBody}\n\n---\n\nX (Arabic):\n${draft.xBody}${draft.imageUrl ? `\n\nImage: ${draft.imageUrl}` : ''}`;
+    const imgs = (draft.metadata?.images && draft.metadata.images.length > 0)
+      ? draft.metadata.images
+      : (draft.imageUrl ? [draft.imageUrl] : []);
+    const tags = draft.metadata?.suggestedTags || [];
+    const lines = [
+      draft.linkedinBody,
+      '',
+      '--- X (Arabic) ---',
+      draft.xBody,
+    ];
+    if (imgs.length > 0) {
+      lines.push('', `--- Images (${imgs.length}) ---`, ...imgs);
+    }
+    if (tags.length > 0) {
+      lines.push('', `--- Suggested tags ---`, tags.join('   '));
+    }
     try {
-      await navigator.clipboard.writeText(blob);
-      setToast('Copied LinkedIn + X + image URL to clipboard. Opening Postiz composer...');
+      await navigator.clipboard.writeText(lines.join('\n'));
+      setToast('Copied LinkedIn + X + images + suggested tags to clipboard. Opening Postiz composer...');
     } catch {
       setToast('Clipboard blocked by browser. Open the draft body manually.');
     }
@@ -97,7 +114,7 @@ export const DraftsComponent: FC = () => {
     void mutate();
   }, [fetch, mutate]);
 
-  const onSetImage = useCallback(async (draftId: string, body: { url?: string; dataUrl?: string }) => {
+  const onSetImage = useCallback(async (draftId: string, body: { url?: string; dataUrl?: string; replace?: boolean }) => {
     const res = await fetch(`/drafts/${draftId}/image`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -105,13 +122,21 @@ export const DraftsComponent: FC = () => {
     });
     const json = (await res.json()) as { ok: boolean; message?: string };
     if (json.ok) {
-      setToast('Image updated.');
+      setToast(body.replace ? 'Cover replaced.' : 'Image added.');
     } else {
       setToast(json.message || 'Image update failed.');
     }
     setTimeout(() => setToast(null), 4000);
     void mutate();
     return json.ok;
+  }, [fetch, mutate]);
+
+  const onDeleteImage = useCallback(async (draftId: string, index: number) => {
+    const res = await fetch(`/drafts/${draftId}/images/${index}`, { method: 'DELETE' });
+    const json = (await res.json()) as { ok: boolean };
+    if (json.ok) setToast('Image removed.');
+    setTimeout(() => setToast(null), 3000);
+    void mutate();
   }, [fetch, mutate]);
 
   const onSaveEdit = useCallback(async (draftId: string, linkedinBody: string, xBody: string) => {
@@ -309,6 +334,7 @@ export const DraftsComponent: FC = () => {
             onRegenerate={onRegenerate}
             onSaveEdit={onSaveEdit}
             onSetImage={onSetImage}
+            onDeleteImage={onDeleteImage}
           />
         ))}
       </div>
@@ -325,8 +351,9 @@ const DraftCard: FC<{
   onSkip: (id: string) => void;
   onRegenerate: (id: string) => void;
   onSaveEdit: (id: string, linkedin: string, x: string) => Promise<boolean>;
-  onSetImage: (id: string, body: { url?: string; dataUrl?: string }) => Promise<boolean>;
-}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit, onSetImage }) => {
+  onSetImage: (id: string, body: { url?: string; dataUrl?: string; replace?: boolean }) => Promise<boolean>;
+  onDeleteImage: (id: string, index: number) => Promise<void>;
+}> = ({ draft, mode, onCopyAndOpen, onCopyOne, onShip, onSkip, onRegenerate, onSaveEdit, onSetImage, onDeleteImage }) => {
   const [editing, setEditing] = useState(false);
   const [editLi, setEditLi] = useState(draft.linkedinBody);
   const [editX, setEditX] = useState(draft.xBody);
@@ -334,6 +361,11 @@ const DraftCard: FC<{
   const [showImagePanel, setShowImagePanel] = useState(false);
   const [imageUrlInput, setImageUrlInput] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
+
+  const images: string[] = (draft.metadata?.images && draft.metadata.images.length > 0)
+    ? draft.metadata.images
+    : (draft.imageUrl ? [draft.imageUrl] : []);
+  const suggestedTags: string[] = draft.metadata?.suggestedTags || [];
 
   const onPickFile = async (file: File) => {
     if (!file) return;
@@ -406,6 +438,23 @@ const DraftCard: FC<{
 
       <div className="grid grid-cols-1 md:grid-cols-[1fr_280px] gap-[16px]">
         <div className="flex flex-col gap-[12px]">
+          {suggestedTags.length > 0 && !editing && (
+            <div className="bg-newBgColorInner rounded-[8px] p-[10px]">
+              <div className="text-[10px] uppercase tracking-wide text-textItemBlur mb-[6px]">Suggested tags (X handles native, others = @-tag manually in Postiz)</div>
+              <div className="flex gap-[6px] flex-wrap">
+                {suggestedTags.map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => onCopyOne(tag, `tag ${tag}`)}
+                    className="px-[8px] py-[3px] bg-newBgColor border border-blockSeparator rounded-[5px] text-[11px] text-newTextColor hover:bg-newBgLineColor"
+                    title="Click to copy"
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {editing ? (
             <>
               <DraftEditor label="LinkedIn (bilingual)" value={editLi} onChange={setEditLi} maxChars={1500} rows={10} />
@@ -418,36 +467,59 @@ const DraftCard: FC<{
             </>
           )}
         </div>
-        <div className="flex flex-col gap-[6px]">
+        <div className="flex flex-col gap-[8px]">
           <div className="flex items-center justify-between">
-            <div className="text-[11px] text-textItemBlur uppercase tracking-wide">Cover image</div>
-            {mode === 'pending' && (
+            <div className="text-[11px] text-textItemBlur uppercase tracking-wide">
+              Images ({images.length}/4)
+            </div>
+            {mode === 'pending' && images.length < 4 && (
               <button
                 onClick={() => setShowImagePanel((v) => !v)}
                 className="text-[11px] text-textItemBlur hover:text-newTextColor"
               >
-                {showImagePanel ? 'Close' : 'Change'}
+                {showImagePanel ? 'Close' : '+ Add'}
               </button>
             )}
           </div>
-          {draft.imageUrl ? (
-            <img
-              src={draft.imageUrl}
-              alt="Cover preview"
-              className="w-full rounded-[8px] border border-blockSeparator"
-            />
-          ) : (
-            <div className="w-full h-[160px] rounded-[8px] border border-dashed border-blockSeparator flex items-center justify-center text-[11px] text-textItemBlur">
-              No cover image
+          {images.length === 0 && (
+            <div className="w-full h-[120px] rounded-[8px] border border-dashed border-blockSeparator flex items-center justify-center text-[11px] text-textItemBlur">
+              No images
             </div>
           )}
-          {showImagePanel && mode === 'pending' && (
+          {images.length > 0 && (
+            <div className="grid grid-cols-2 gap-[6px]">
+              {images.map((img, idx) => (
+                <div key={img + idx} className="relative group">
+                  <img
+                    src={img}
+                    alt={`Image ${idx + 1}`}
+                    className="w-full aspect-video object-cover rounded-[6px] border border-blockSeparator"
+                  />
+                  {idx === 0 && (
+                    <div className="absolute top-[4px] left-[4px] text-[9px] uppercase tracking-wide bg-black/60 text-white px-[4px] py-[1px] rounded-[3px]">
+                      Cover
+                    </div>
+                  )}
+                  {mode === 'pending' && (
+                    <button
+                      onClick={() => onDeleteImage(draft.id, idx)}
+                      className="absolute top-[4px] right-[4px] w-[20px] h-[20px] bg-black/60 text-white rounded-full text-[12px] leading-none opacity-0 group-hover:opacity-100 hover:bg-red-700"
+                      title="Remove this image"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {showImagePanel && mode === 'pending' && images.length < 4 && (
             <div className="bg-newBgColorInner rounded-[6px] p-[10px] flex flex-col gap-[8px]">
               <input
                 type="url"
                 value={imageUrlInput}
                 onChange={(e) => setImageUrlInput(e.target.value)}
-                placeholder="Paste image URL"
+                placeholder="Paste image URL (Twitter, news article, Drive…)"
                 className="w-full px-[8px] py-[6px] bg-newBgColor border border-blockSeparator rounded-[6px] text-[12px] text-newTextColor"
               />
               <button
@@ -455,7 +527,7 @@ const DraftCard: FC<{
                 disabled={uploadingImage || !imageUrlInput.trim()}
                 className="px-[10px] py-[6px] bg-newButtonColor text-newTextColor rounded-[6px] text-[12px] disabled:opacity-50"
               >
-                {uploadingImage ? 'Working...' : 'Use this URL'}
+                {uploadingImage ? 'Working...' : 'Add from URL'}
               </button>
               <div className="text-[10px] text-textItemBlur text-center">or</div>
               <input
@@ -468,6 +540,9 @@ const DraftCard: FC<{
                 disabled={uploadingImage}
                 className="text-[11px] text-textItemBlur"
               />
+              <div className="text-[10px] text-textItemBlur">
+                LinkedIn supports up to 9, X up to 4 — we cap at 4 to keep both happy.
+              </div>
             </div>
           )}
         </div>
