@@ -373,7 +373,7 @@ export class DraftsController {
         order: '',
         shortLink: false,
         inter: false,
-      } as any);
+      } as any, 'WEB');
       const postIds = (created || []).map((r: any) => r.postId);
       const firstPost = postIds[0];
 
