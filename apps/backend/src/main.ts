@@ -15,6 +15,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
 import { SubscriptionExceptionFilter } from '@gitroom/backend/services/auth/permissions/subscription.exception';
+import { PostValidationExceptionFilter } from '@gitroom/backend/api/routes/posts.validation.exception';
 import { HttpExceptionFilter } from '@gitroom/nestjs-libraries/services/exception.filter';
 import { ConfigurationChecker } from '@gitroom/helpers/configuration/configuration.checker';
 import { startMcp } from '@gitroom/nestjs-libraries/chat/start.mcp';
@@ -30,6 +31,8 @@ async function start() {
         'auth',
         'showorg',
         'impersonate',
+        'x-postiz-org',
+        'x-postiz-include-deleted',
         'x-copilotkit-runtime-client-gql-version',
       ],
       exposedHeaders: [
@@ -43,6 +46,15 @@ async function start() {
         process.env.FRONTEND_URL,
         'http://localhost:6274',
         ...(process.env.MAIN_URL ? [process.env.MAIN_URL] : []),
+        // Optional: the Canva app calls the public API from its iframe origin
+        // (browsers send it lowercase, e.g. https://app-aabbcc.canva-apps.com)
+        ...(process.env.CANVA_APP_ORIGIN
+          ? [
+              process.env.CANVA_APP_ORIGIN.trim()
+                .replace(/\/+$/, '')
+                .toLowerCase(),
+            ]
+          : []),
       ],
     },
   });
@@ -55,13 +67,14 @@ async function start() {
     })
   );
 
-  app.use(['/copilot/*', '/posts', '/drafts/*'], (req: any, res: any, next: any) => {
+  app.use(['/copilot/{*splat}', '/posts', '/drafts/{*splat}'], (req: any, res: any, next: any) => {
     json({ limit: '50mb' })(req, res, next);
   });
 
   app.use(cookieParser());
   app.use(compression());
   app.useGlobalFilters(new SubscriptionExceptionFilter());
+  app.useGlobalFilters(new PostValidationExceptionFilter());
   app.useGlobalFilters(new HttpExceptionFilter());
 
   loadSwagger(app);

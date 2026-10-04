@@ -51,6 +51,7 @@ import { MissingReleaseModal } from '@gitroom/frontend/components/launches/missi
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import i18next from 'i18next';
 import { AddEditModal } from '@gitroom/frontend/components/new-launch/add.edit.modal';
+import { CreationMethodBadge } from '@gitroom/frontend/components/launches/creation.method.badge';
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
 import copy from 'copy-to-clipboard';
@@ -113,6 +114,11 @@ const usePostActions = (onMutate?: () => void) => {
       };
 
       const data = await (await fetch(`/posts/group/${post.group}`)).json();
+      if (!data?.posts?.length) {
+        toaster.show(t('post_not_found', 'Post not found'), 'warning');
+        mutate();
+        return;
+      }
       const date = !isDuplicate
         ? null
         : (await (await fetch('/posts/find-slot')).json()).date;
@@ -169,28 +175,23 @@ const usePostActions = (onMutate?: () => void) => {
         title: ``,
       });
     },
-    [integrations, fetch, modal, mutate]
+    [integrations, fetch, modal, mutate, toaster, t]
   );
 
   const copyDebugJson = useCallback(
-    (post: any) => async () => {
-      try {
-        const data = await (
-          await fetch(`/posts/group/${post.group}/debug-export`)
-        ).json();
-        copy(JSON.stringify(data, null, 2));
-        toaster.show(
-          t('debug_json_copied', 'Debug JSON copied to clipboard'),
-          'success'
-        );
-      } catch {
-        toaster.show(
-          t('debug_json_copy_failed', 'Failed to copy debug data'),
-          'warning'
-        );
-      }
+    (post: any) => () => {
+      modal.openModal({
+        title: t('copy_debug_json', 'Copy Debug JSON'),
+        closeOnClickOutside: true,
+        closeOnEscape: true,
+        withCloseButton: true,
+        classNames: {
+          modal: 'w-[100%] max-w-[500px]',
+        },
+        children: <DebugJsonModal post={post} />,
+      });
     },
-    [fetch, toaster, t]
+    [modal, t]
   );
 
   const deletePost = useCallback(
@@ -308,7 +309,7 @@ export const DayView = () => {
       <div className="absolute start-0 top-0 w-full h-full flex flex-col overflow-auto scrollbar scrollbar-thumb-fifth scrollbar-track-newBgColor">
         {options.map((option) => (
           <Fragment key={option[0].time}>
-            <div className="text-center text-[14px] min-h-[21px]">
+            <div className="text-center text-[14px] min-h-[21px] shrink-0">
               {newDayjs()
                 .utc()
                 .startOf('day')
@@ -318,7 +319,7 @@ export const DayView = () => {
             </div>
             <div
               key={option[0].time}
-              className="min-h-[60px] rounded-[10px] flex justify-center items-center gap-[10px] mb-[20px]"
+              className="min-h-[60px] shrink-0 rounded-[10px] flex justify-center items-center gap-[10px] mb-[20px]"
             >
               <CalendarContext.Provider
                 value={{
@@ -365,7 +366,7 @@ export const WeekView = () => {
   return (
     <div className="flex flex-col text-textColor flex-1">
       <div className="flex-1 relative">
-        <div className="grid [grid-template-columns:136px_repeat(7,_minmax(0,_1fr))] gap-[4px] rounded-[10px] absolute h-full start-0 top-0 w-full overflow-auto scrollbar scrollbar-thumb-fifth scrollbar-track-newBgColor">
+        <div className="grid [grid-template-columns:136px_repeat(7,_minmax(0,_1fr))] tablet:[grid-template-columns:72px_repeat(7,_minmax(100px,_1fr))] gap-[4px] rounded-[10px] absolute h-full start-0 top-0 w-full overflow-auto scrollbar scrollbar-thumb-fifth scrollbar-track-newBgColor">
           <div className="z-10 bg-newTableHeader flex justify-center items-center flex-col h-[62px] rounded-[8px] sticky top-0"></div>
           {localizedDays.map((day, index) => (
             <div
@@ -391,7 +392,7 @@ export const WeekView = () => {
           ))}
           {hours.map((hour) => (
             <Fragment key={hour}>
-              <div className="p-2 pe-4 text-center items-center justify-center flex text-[14px] text-newTableText">
+              <div className="p-2 pe-4 tablet:px-[4px] text-center items-center justify-center flex text-[14px] tablet:text-[12px] tablet:whitespace-nowrap text-newTableText">
                 {convertTimeFormatBasedOnLocality(hour)}
               </div>
               {localizedDays.map((day, indexDay) => (
@@ -464,7 +465,7 @@ export const MonthView = () => {
   return (
     <div className="flex flex-col text-textColor flex-1">
       <div className="flex-1 flex relative">
-        <div className="grid grid-cols-7 grid-rows-[62px_auto] gap-[4px] rounded-[10px] absolute start-0 top-0 overflow-auto w-full h-full scrollbar scrollbar-thumb-tableBorder scrollbar-track-secondary">
+        <div className="grid grid-cols-7 tablet:[grid-template-columns:repeat(7,_minmax(100px,_1fr))] grid-rows-[62px_auto] gap-[4px] rounded-[10px] absolute start-0 top-0 overflow-auto w-full h-full scrollbar scrollbar-thumb-tableBorder scrollbar-track-secondary">
           {localizedDays.map((day) => (
             <div
               key={day}
@@ -492,7 +493,15 @@ export const MonthView = () => {
 export const ListView = () => {
   const t = useT();
   const user = useUser();
-  const { integrations, loading, listPosts } = useCalendar();
+  const { integrations, loading, listPosts, listState } = useCalendar();
+  const emptyMessage =
+    listState === 'scheduled'
+      ? t('no_upcoming_posts', 'No upcoming posts scheduled')
+      : listState === 'draft'
+      ? t('no_draft_posts', 'No draft posts')
+      : listState === 'published'
+      ? t('no_published_posts', 'No published posts')
+      : t('no_posts', 'No posts');
 
   // Use shared post actions hook
   const { editPost, deletePost, copyDebugJson, openStatistics, openMissingRelease } = usePostActions();
@@ -521,9 +530,7 @@ export const ListView = () => {
   if (listPosts.length === 0) {
     return (
       <div className="flex flex-col flex-1 items-center justify-center">
-        <div className="text-textColor text-[16px]">
-          {t('no_upcoming_posts', 'No upcoming posts scheduled')}
-        </div>
+        <div className="text-textColor text-[16px]">{emptyMessage}</div>
       </div>
     );
   }
@@ -677,8 +684,18 @@ export const CalendarColumn: FC<{
                 <div className="flex flex-col">
                   <div className="text-[20px] mb-[20px]">
                     {t(
-                      'post_already_published_drag',
-                      'This post was already published, what do you want to do?'
+                      'post_already_published_republish_warning',
+                      'This post was already published. Republishing will publish it again to'
+                    )}{' '}
+                    {post.integration?.name}{' '}
+                    {t('republish_at', 'at')} {getDate.format('DD/MM/YYYY HH:mm')}.
+                    {(!!item.interval || !!post.intervalInDays) && (
+                      <div className="mt-[10px]">
+                        {t(
+                          'republish_recurring_note',
+                          'This is a recurring post: your changes apply to all future recurrences starting now.'
+                        )}
+                      </div>
                     )}
                   </div>
                   <div className="flex w-full gap-[10px]">
@@ -728,6 +745,9 @@ export const CalendarColumn: FC<{
         body: JSON.stringify({
           date: getDate.utc().format('YYYY-MM-DDTHH:mm:ss'),
           action,
+          // published posts always confirm via the modal before reaching here;
+          // for QUEUE posts the flag is a no-op on the server
+          ...(action === 'schedule' ? { republish: true } : {}),
         }),
       });
       if (status !== 500) {
@@ -921,7 +941,7 @@ export const CalendarColumn: FC<{
               )}
               {display === 'day' && (
                 <div
-                  className={`w-full h-full rounded-[10px] py-[10px] flex-wrap hover:border hover:border-seventh flex justify-center items-center gap-[20px] opacity-30 grayscale hover:grayscale-0 hover:opacity-100`}
+                  className={`w-full h-full rounded-[10px] py-[10px] flex-wrap hover:border hover:border-seventh flex justify-center items-center gap-[20px] mobile:gap-[12px] opacity-30 grayscale hover:grayscale-0 hover:opacity-100`}
                 >
                   {integrations.map((selectedIntegrations) => (
                     <div
@@ -1005,6 +1025,11 @@ const CalendarItem: FC<{
     missingRelease,
   } = props;
   const { disableXAnalytics } = useVariables();
+  const user = useUser();
+  const showCreationMethodBadge =
+    user?.impersonate &&
+    post.creationMethod &&
+    post.creationMethod !== 'UNKNOWN';
   const preview = useCallback(() => {
     window.open(`/p/` + post.id + '?share=true', '_blank');
   }, [post]);
@@ -1042,6 +1067,14 @@ const CalendarItem: FC<{
           data-tooltip-content={post.error || 'An error occurred while publishing this post'}
         >
           !
+        </div>
+      )}
+      {showCreationMethodBadge && (
+        <div className="absolute -bottom-[4px] -right-[4px] z-10">
+          <CreationMethodBadge
+            creationMethod={post.creationMethod}
+            ringColor="var(--new-bgColor)"
+          />
         </div>
       )}
       <div
@@ -1162,6 +1195,56 @@ const CalendarItem: FC<{
     </div>
   );
 });
+const DebugJsonModal: FC<{ post: any }> = ({ post }) => {
+  const t = useT();
+  const fetch = useFetch();
+  const toaster = useToaster();
+  const { closeCurrent } = useModals();
+
+  const copyPostId = useCallback(() => {
+    copy(post.id);
+    toaster.show(
+      t('post_id_copied', 'Post ID copied to clipboard'),
+      'success'
+    );
+    closeCurrent();
+  }, [post, toaster, t, closeCurrent]);
+
+  const copyJson = useCallback(async () => {
+    try {
+      const data = await (
+        await fetch(`/posts/group/${post.group}/debug-export`)
+      ).json();
+      copy(JSON.stringify(data, null, 2));
+      toaster.show(
+        t('debug_json_copied', 'Debug JSON copied to clipboard'),
+        'success'
+      );
+      closeCurrent();
+    } catch {
+      toaster.show(
+        t('debug_json_copy_failed', 'Failed to copy debug data'),
+        'warning'
+      );
+    }
+  }, [fetch, post, toaster, t, closeCurrent]);
+
+  return (
+    <div className="flex flex-col gap-[16px] p-[16px]">
+      <div className="text-textColor text-[14px]">
+        {t('debug_choose_copy', 'Choose what you want to copy')}
+      </div>
+      <div className="flex gap-[10px]">
+        <Button onClick={copyPostId}>
+          {t('copy_post_id', 'Copy post id')}
+        </Button>
+        <Button secondary onClick={copyJson}>
+          {t('copy_debug_json', 'Copy Debug JSON')}
+        </Button>
+      </div>
+    </div>
+  );
+};
 const CopyDebug = () => {
   const t = useT();
   return (

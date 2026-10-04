@@ -1,32 +1,39 @@
-# BHD fork build.
-# Uses the official Postiz image as the base (already has node_modules,
-# nginx config, pm2 setup), but replaces ALL source code with our fork's
-# version so version mismatches between upstream master and the ghcr.io
-# image don't cause cross-imports to break.
+# BHD fork build: upstream Dockerfile.dev, a full source build.
+#
+# The old Dockerfile.bhd overlaid our source on ghcr.io/gitroomhq/postiz-app:latest
+# and rebuilt only frontend + backend. The orchestrator dist came from the base
+# image, so new workflow versions (V103+) went missing and posts stuck in QUEUE.
+# Building everything from source removes that whole class of drift, and the
+# host-mounted patch files (posts.service, linkedin.provider x2, nginx.conf)
+# are no longer needed: their fixes live in source now.
 #
 # Build:
-#   docker build -f Dockerfile.bhd -t bhd-postiz:latest .
+#   docker build -f Dockerfile.bhd -t bhd-postiz:<version> .
 
-FROM ghcr.io/gitroomhq/postiz-app:latest
+FROM node:22.20-bookworm-slim
+ARG NEXT_PUBLIC_VERSION
+ENV NEXT_PUBLIC_VERSION=$NEXT_PUBLIC_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++ \
+    make \
+    python3-pip \
+    bash \
+    nginx \
+&& rm -rf /var/lib/apt/lists/*
+
+RUN addgroup --system www \
+ && adduser --system --ingroup www --home /www --shell /usr/sbin/nologin www \
+ && mkdir -p /www \
+ && chown -R www:www /www /var/lib/nginx
+
+RUN npm --no-update-notifier --no-fund --global install pnpm@10.6.1 pm2
 
 WORKDIR /app
 
-# Replace the entire source tree with our fork's version. This is heavier
-# than copying just the changed files but eliminates the class of bugs
-# where our edits reference files that exist in our fork but not in the
-# upstream base image.
-COPY apps/backend/src/   /app/apps/backend/src/
-COPY apps/frontend/src/  /app/apps/frontend/src/
-COPY apps/orchestrator/src/ /app/apps/orchestrator/src/
-COPY libraries/         /app/libraries/
+COPY . /app
+COPY var/docker/nginx.conf /etc/nginx/nginx.conf
 
-# Workspace metadata that may have drifted
-COPY apps/backend/package.json   /app/apps/backend/package.json
-COPY apps/frontend/package.json  /app/apps/frontend/package.json
-COPY apps/orchestrator/package.json /app/apps/orchestrator/package.json
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json /app/
+RUN pnpm install
+RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
 
-# Reinstall deps (official image is production-pruned) and rebuild
-RUN pnpm install --prefer-offline --no-frozen-lockfile && \
-    pnpm run build:frontend && \
-    pnpm run build:backend
+CMD ["sh", "-c", "nginx && pnpm run pm2"]

@@ -23,12 +23,15 @@ import { useFireEvents } from '@gitroom/helpers/utils/use.fire.events';
 import { useUtmUrl } from '@gitroom/helpers/utils/utm.saver';
 import { useTrack } from '@gitroom/react/helpers/use.track';
 import { TrackEnum } from '@gitroom/nestjs-libraries/user/track.enum';
-import { PurchaseCrypto } from '@gitroom/frontend/components/billing/purchase.crypto';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { FinishTrial } from '@gitroom/frontend/components/billing/finish.trial';
 import { newDayjs } from '@gitroom/frontend/components/layout/set.timezone';
 import { useDubClickId } from '@gitroom/frontend/components/layout/dubAnalytics';
 import { LogoutComponent } from '@gitroom/frontend/components/layout/logout.component';
+
+type SubscriptionWithPlatform = Subscription & {
+  platform?: 'web' | 'mobile';
+};
 
 export const Prorate: FC<{
   period: 'MONTHLY' | 'YEARLY';
@@ -109,6 +112,11 @@ export const Features: FC<{
     if (currentPricing?.generate_videos) {
       list.push(`${currentPricing?.generate_videos} AI Videos per month`);
     }
+    if (currentPricing?.clipping_minutes) {
+      list.push(
+        `${currentPricing?.clipping_minutes} minutes of AI video clipping per month`
+      );
+    }
     return list;
   }, [pack]);
   return (
@@ -129,7 +137,7 @@ export const Features: FC<{
               />
             </svg>
           </div>
-          <div>{feature}</div>
+          <div className="text-start">{feature}</div>
         </div>
       ))}
     </div>
@@ -210,7 +218,7 @@ const Info: FC<{
   );
 };
 export const MainBillingComponent: FC<{
-  sub?: Subscription;
+  sub?: SubscriptionWithPlatform;
 }> = (props) => {
   const { sub } = props;
   const { isGeneral } = useVariables();
@@ -229,7 +237,7 @@ export const MainBillingComponent: FC<{
     !!queryParams.get('finishTrial')
   );
 
-  const [subscription, setSubscription] = useState<Subscription | undefined>(
+  const [subscription, setSubscription] = useState<SubscriptionWithPlatform | undefined>(
     sub
   );
   const [loading, setLoading] = useState<boolean>(false);
@@ -380,7 +388,7 @@ export const MainBillingComponent: FC<{
           return;
         }
         setLoading(true);
-        const { url, portal } = await (
+        const { url, portal, blocked } = await (
           await fetch('/billing/subscribe', {
             method: 'POST',
             body: JSON.stringify({
@@ -391,6 +399,18 @@ export const MainBillingComponent: FC<{
             }),
           })
         ).json();
+        if (blocked) {
+          setLoading(false);
+          await deleteDialog(
+            t(
+              'billing_other_account_subscribed',
+              'Another account with this email already has an active subscription. Please log off and sign in to that account to manage your subscription.'
+            ),
+            t('ok', 'OK'),
+            t('already_subscribed', 'Already subscribed')
+          );
+          return;
+        }
         if (url) {
           await track(TrackEnum.InitiateCheckout, {
             value:
@@ -437,6 +457,30 @@ export const MainBillingComponent: FC<{
   if (user?.isLifetime) {
     router.replace('/');
     return null;
+  }
+  if (subscription?.platform && subscription.platform !== 'web') {
+    return (
+      <div className="flex flex-col gap-[16px]">
+        <div className="text-[20px]">{t('plans', 'Plans')}</div>
+        <div className="flex flex-col items-center gap-[8px] rounded-[8px] bg-newBgColorInner p-[24px] text-center">
+          <div className="text-[18px]">
+            {t('subscription_managed_by', 'Your subscription is managed by')}{' '}
+            <span className="capitalize">{subscription.provider}</span>
+          </div>
+          <div className="text-[14px] opacity-70">
+            {t(
+              'subscription_manage_on_platform',
+              'Please go to {{platform}} to manage it',
+              { platform: subscription.platform }
+            )}
+          </div>
+        </div>
+        <FAQComponent />
+        <div className="flex justify-center mt-[20px]">
+          <LogoutComponent />
+        </div>
+      </div>
+    );
   }
   return (
     <div className="flex flex-col gap-[16px]">
@@ -538,10 +582,12 @@ export const MainBillingComponent: FC<{
             </div>
           ))}
       </div>
-      {!subscription?.id && <PurchaseCrypto />}
       {!!subscription?.id && (
-        <div className="flex justify-center mt-[20px] gap-[10px]">
-          <Button onClick={updatePayment}>
+        <div className="flex justify-center mt-[20px] gap-[10px] mobile:flex-col">
+          <Button
+            onClick={updatePayment}
+            className="mobile:h-auto mobile:min-h-[40px] mobile:py-[8px] mobile:text-center"
+          >
             {t(
               'update_payment_method_invoices_history',
               'Update Payment Method / Invoices History'

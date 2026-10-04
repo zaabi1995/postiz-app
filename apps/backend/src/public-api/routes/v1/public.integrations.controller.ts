@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -9,21 +10,23 @@ import {
   Put,
   Query,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
-  UsePipes,
 } from '@nestjs/common';
-import { CustomFileValidationPipe } from '@gitroom/nestjs-libraries/upload/custom.upload.validation';
+import { streamUploadOptions } from '@gitroom/nestjs-libraries/upload/multer.stream.engine';
 import { ApiTags } from '@nestjs/swagger';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
+import { GetIncludeDeletedFromRequest } from '@gitroom/nestjs-libraries/user/include.deleted.from.request';
+import { GetOAuthUserIdFromRequest } from '@gitroom/nestjs-libraries/user/oauth.user.id.from.request';
 import { Organization } from '@prisma/client';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { ChangePostStatusDto } from '@gitroom/nestjs-libraries/dtos/posts/change.post.status.dto';
+import { UpdatePostSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/update.post.settings.dto';
 import {
   AuthorizationActions,
   Sections,
@@ -31,23 +34,10 @@ import {
 import { VideoDto } from '@gitroom/nestjs-libraries/dtos/videos/video.dto';
 import { VideoFunctionDto } from '@gitroom/nestjs-libraries/dtos/videos/video.function.dto';
 import { UploadDto } from '@gitroom/nestjs-libraries/dtos/media/upload.dto';
+import { ClippingDto } from '@gitroom/nestjs-libraries/dtos/clipping/clipping.dto';
+import { ClippingService } from '@gitroom/nestjs-libraries/database/prisma/clipping/clipping.service';
 import { NotificationService } from '@gitroom/nestjs-libraries/database/prisma/notifications/notification.service';
 import { GetNotificationsDto } from '@gitroom/nestjs-libraries/dtos/notifications/get.notifications.dto';
-import { Readable } from 'stream';
-import { ssrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { fromBuffer } = require('file-type');
-
-const PUBLIC_API_ALLOWED_MIME = new Set<string>([
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-  'image/avif',
-  'image/bmp',
-  'image/tiff',
-  'video/mp4',
-]);
 import * as Sentry from '@sentry/nestjs';
 import {
   socialIntegrationList,
@@ -56,26 +46,34 @@ import {
 import { getValidationSchemas } from '@gitroom/nestjs-libraries/chat/validation.schemas.helper';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { PostValidationException } from '@gitroom/backend/api/routes/posts.validation.exception';
+import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
+import { SuperAdminGuard } from '@gitroom/backend/services/auth/super.admin.guard';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
+import { AdminStatsService } from '@gitroom/nestjs-libraries/database/prisma/admin-stats/admin-stats.service';
+import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
+import { GetOrgActivityDto } from '@gitroom/nestjs-libraries/dtos/analytics/get.org.activity.dto';
+import dayjs from 'dayjs';
 
 @ApiTags('Public API')
 @Controller('/public/v1')
 export class PublicIntegrationsController {
-  private storage = UploadFactory.createStorage();
-
   constructor(
     private _integrationService: IntegrationService,
     private _postsService: PostsService,
     private _mediaService: MediaService,
     private _notificationService: NotificationService,
     private _integrationManager: IntegrationManager,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _usersService: UsersService,
+    private _adminStatsService: AdminStatsService,
+    private _organizationService: OrganizationService,
+    private _clippingService: ClippingService
   ) {}
 
   @Post('/upload')
-  @UseInterceptors(FileInterceptor('file'))
-  @UsePipes(new CustomFileValidationPipe())
+  @UseInterceptors(FileInterceptor('file', streamUploadOptions()))
   async uploadSimple(
     @GetOrgFromRequest() org: Organization,
     @UploadedFile('file') file: Express.Multer.File
@@ -85,12 +83,7 @@ export class PublicIntegrationsController {
       throw new HttpException({ msg: 'No file provided' }, 400);
     }
 
-    const getFile = await this.storage.uploadFile(file);
-    return this._mediaService.saveFile(
-      org.id,
-      getFile.originalname,
-      getFile.path
-    );
+    return this._mediaService.saveFile(org.id, file.filename, file.path);
   }
 
   @Post('/upload-from-url')
@@ -99,39 +92,15 @@ export class PublicIntegrationsController {
     @Body() body: UploadDto
   ) {
     Sentry.metrics.count('public_api-request', 1);
-    const response = await fetch(body.url, {
-      // @ts-ignore — undici option, not in lib.dom fetch types
-      dispatcher: ssrfSafeDispatcher,
-    });
-    if (!response.ok) {
-      throw new HttpException({ msg: 'Failed to fetch URL' }, 400);
+    try {
+      return await this._mediaService.uploadFromUrl(org.id, body.url);
+    } catch (err) {
+      // Validation failures keep this route's { msg } error shape
+      if (err instanceof BadRequestException) {
+        throw new HttpException({ msg: err.message }, 400);
+      }
+      throw err;
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const detected = await fromBuffer(buffer);
-    if (!detected || !PUBLIC_API_ALLOWED_MIME.has(detected.mime)) {
-      throw new HttpException({ msg: 'Unsupported file type.' }, 400);
-    }
-    const mimetype = detected.mime;
-    const ext = detected.ext;
-
-    const getFile = await this.storage.uploadFile({
-      buffer,
-      mimetype,
-      size: buffer.length,
-      path: '',
-      fieldname: '',
-      destination: '',
-      stream: new Readable(),
-      filename: '',
-      originalname: `upload.${ext}`,
-      encoding: '',
-    });
-
-    return this._mediaService.saveFile(
-      org.id,
-      getFile.originalname,
-      getFile.path
-    );
   }
 
   @Get('/find-slot/:id')
@@ -166,7 +135,7 @@ export class PublicIntegrationsController {
     const body = await this._postsService.mapTypeToPost(
       rawBody,
       org.id,
-      rawBody.type === 'draft'
+      rawBody?.type === 'draft' || true
     );
     body.type = rawBody.type;
 
@@ -188,8 +157,52 @@ export class PublicIntegrationsController {
       );
     }
 
-    console.log(JSON.stringify(body, null, 2));
-    return this._postsService.createPost(org.id, body);
+    // Server-side validation — same rules as the dashboard, surfaced as a
+    // readable 400 (see PostValidationExceptionFilter).
+    const validation = await this._postsService.validatePosts(
+      org.id,
+      body.posts
+    );
+
+    const fail = (item: (typeof validation)[number], error: string) => {
+      throw new PostValidationException({
+        provider: item.identifier,
+        name: item.name,
+        error,
+      });
+    };
+
+    for (const item of validation) {
+      if (item.emptyContent) {
+        fail(
+          item,
+          'Your post should have at least one character or one image.'
+        );
+      }
+    }
+
+    if (body.type !== 'draft') {
+      for (const item of validation) {
+        if (!item.valid) {
+          fail(item, item.settingsError || 'Please fix your settings');
+        }
+        if (item.errors !== true) {
+          fail(item, item.errors as string);
+        }
+        if (item.tooLong) {
+          fail(item, 'post is too long, please fix it');
+        }
+      }
+    }
+
+    const allowedCreationMethods = ['CLI', 'API'] as const;
+    const creationMethod = allowedCreationMethods.includes(
+      rawBody.creationMethod
+    )
+      ? (rawBody.creationMethod as 'CLI' | 'API')
+      : 'API';
+
+    return this._postsService.createPost(org.id, body, creationMethod);
   }
 
   @Delete('/posts/:id')
@@ -217,25 +230,57 @@ export class PublicIntegrationsController {
     return { connected: true };
   }
 
-  @Get('/integrations')
-  async listIntegration(@GetOrgFromRequest() org: Organization) {
+  // `user` is only known for OAuth app tokens; an API key belongs to the
+  // whole organization
+  @Get('/me')
+  async getMe(
+    @GetOrgFromRequest() org: Organization,
+    @GetOAuthUserIdFromRequest() userId?: string
+  ) {
     Sentry.metrics.count('public_api-request', 1);
-    return (await this._integrationService.getIntegrationsList(org.id)).map(
-      (org) => ({
-        id: org.id,
-        name: org.name,
-        identifier: org.providerIdentifier,
-        picture: org.picture,
-        disabled: org.disabled,
-        profile: org.profile,
-        customer: org.customer
-          ? {
-              id: org.customer.id,
-              name: org.customer.name,
-            }
-          : undefined,
+    const user = userId ? await this._usersService.getPersonal(userId) : null;
+
+    return {
+      organization: { id: org.id, name: org.name },
+      user: user
+        ? { id: user.id, name: user.name, picture: user.picture?.path || null }
+        : null,
+    };
+  }
+
+  @Get('/groups')
+  async listGroups(@GetOrgFromRequest() org: Organization) {
+    Sentry.metrics.count('public_api-request', 1);
+    return (await this._integrationService.customers(org.id)).map(
+      (customer) => ({
+        id: customer.id,
+        name: customer.name,
       })
     );
+  }
+
+  @Get('/integrations')
+  async listIntegration(
+    @GetOrgFromRequest() org: Organization,
+    @Query('group') group?: string
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return (await this._integrationService.getIntegrationsList(org.id))
+      .filter((integration) => !group || integration.customer?.id === group)
+      .map((integration) => ({
+        id: integration.id,
+        name: integration.name,
+        identifier: integration.providerIdentifier,
+        picture: integration.picture,
+        disabled: integration.disabled,
+        profile: integration.profile,
+        customer: integration.customer
+          ? {
+              id: integration.customer.id,
+              name: integration.customer.name,
+            }
+          : undefined,
+      }));
   }
 
   @Get('/social/:integration')
@@ -254,8 +299,16 @@ export class PublicIntegrationsController {
       throw new HttpException({ msg: 'Integration not allowed' }, 400);
     }
 
-    const integrationProvider =
-      this._integrationManager.getSocialIntegration(integration);
+    // A provider migrated via MIGRATE_PROVIDERS reconnects through its target
+    // provider's OAuth: the callback lands on the target and the channel is
+    // migrated in place (see migrateIntegration).
+    const migrateTo = refresh
+      ? this._integrationManager.getMigrationTarget(integration)
+      : undefined;
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      migrateTo || integration
+    );
 
     if (integrationProvider.externalUrl) {
       throw new HttpException(
@@ -281,6 +334,81 @@ export class PublicIntegrationsController {
     } catch (err) {
       throw new HttpException({ msg: 'Failed to generate auth URL' }, 500);
     }
+  }
+
+  @Get('/users')
+  @UseGuards(SuperAdminGuard)
+  async listUsers(
+    @GetOrgFromRequest() org: Organization,
+    @Query('name') name: string
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    const term = name?.trim();
+
+    if (!term) {
+      throw new HttpException({ msg: 'A search term is required' }, 400);
+    }
+
+    return this._usersService.getImpersonateUser(term);
+  }
+
+  @Get('/debug/posts/:id')
+  @UseGuards(SuperAdminGuard)
+  async getPostTimeline(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    const timeline = await this._postsService.getPostTimeline(id, org.id);
+
+    if (!timeline) {
+      throw new HttpException({ msg: 'Post not found' }, 404);
+    }
+
+    return timeline;
+  }
+
+  @Get('/debug/account')
+  @UseGuards(SuperAdminGuard)
+  async getAccountOverview(@GetOrgFromRequest() org: Organization) {
+    Sentry.metrics.count('public_api-request', 1);
+    const account = await this._organizationService.getAccountOverview(org.id);
+
+    if (!account) {
+      throw new HttpException({ msg: 'Organization not found' }, 404);
+    }
+
+    return account;
+  }
+
+  @Get('/debug/channels')
+  @UseGuards(SuperAdminGuard)
+  async getChannelHealth(
+    @GetOrgFromRequest() org: Organization,
+    @GetIncludeDeletedFromRequest() includeDeleted: boolean
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._integrationService.getChannelHealth(org.id, includeDeleted);
+  }
+
+  @Get('/debug/activity')
+  @UseGuards(SuperAdminGuard)
+  async getOrgActivity(
+    @GetOrgFromRequest() org: Organization,
+    @GetIncludeDeletedFromRequest() includeDeleted: boolean,
+    @Query() query: GetOrgActivityDto
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+
+    const from = query.from ? dayjs(query.from) : dayjs().subtract(30, 'day');
+    const to = query.to ? dayjs(query.to) : dayjs();
+
+    return this._adminStatsService.getOrgActivity({
+      organizationId: org.id,
+      from: from.startOf('day').toDate(),
+      to: to.endOf('day').toDate(),
+      includeDeleted,
+    });
   }
 
   @Get('/notifications')
@@ -314,6 +442,30 @@ export class PublicIntegrationsController {
     );
   }
 
+  @Post('/clipping')
+  startClipping(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: ClippingDto
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._clippingService.startClipping(org, body);
+  }
+
+  @Get('/clipping')
+  getClippings(
+    @GetOrgFromRequest() org: Organization,
+    @Query('page') page: number
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._clippingService.getClippings(org.id, page);
+  }
+
+  @Get('/clipping/:id')
+  getClipping(@GetOrgFromRequest() org: Organization, @Param('id') id: string) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._clippingService.getClipping(org.id, id);
+  }
+
   @Delete('/integrations/:id')
   async deleteChannel(
     @GetOrgFromRequest() org: Organization,
@@ -343,6 +495,10 @@ export class PublicIntegrationsController {
       org.id,
       id
     );
+
+    if (!loadIntegration) {
+      throw new HttpException({ msg: 'Integration not found' }, 404);
+    }
 
     const verified =
       JSON.parse(loadIntegration.additionalSettings || '[]')?.find(
@@ -383,6 +539,21 @@ export class PublicIntegrationsController {
   ) {
     Sentry.metrics.count('public_api-request', 1);
     return this._postsService.getMissingContent(org.id, id);
+  }
+
+  @Put('/posts/:id/settings')
+  async updatePostSettings(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: UpdatePostSettingsDto
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    return this._postsService.updatePostSettings(
+      org.id,
+      id,
+      body.settings,
+      'API'
+    );
   }
 
   @Put('/posts/:id/status')

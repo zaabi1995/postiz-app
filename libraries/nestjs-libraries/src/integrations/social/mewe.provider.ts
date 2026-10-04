@@ -5,11 +5,13 @@ import {
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
+import { makeSecureId } from '@gitroom/nestjs-libraries/services/make.secure.id';
 import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
 import { MeweDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/mewe.dto';
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
+import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 
 export class MeweProvider extends SocialAbstract implements SocialProvider {
   identifier = 'mewe';
@@ -78,7 +80,7 @@ export class MeweProvider extends SocialAbstract implements SocialProvider {
   }
 
   async generateAuthUrl() {
-    const state = makeId(6);
+    const state = makeSecureId(6);
     return {
       url:
         `${this.meweHost}/login` +
@@ -87,7 +89,7 @@ export class MeweProvider extends SocialAbstract implements SocialProvider {
           `${process.env.FRONTEND_URL}/integrations/social/mewe`
         )}` +
         `&state=${state}`,
-      codeVerifier: makeId(10),
+      codeVerifier: makeSecureId(10),
       state,
     };
   }
@@ -244,7 +246,7 @@ export class MeweProvider extends SocialAbstract implements SocialProvider {
 
     // Upload photos if present (exclude videos)
     const imageMedia =
-      firstPost.media?.filter((m) => !m.path || m.path.indexOf('mp4') === -1) ||
+      firstPost.media?.filter((m) => !m.path || !hasExtension(m.path, 'mp4')) ||
       [];
 
     const uploadedPhotoIds: string[] = [];

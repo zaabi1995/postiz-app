@@ -23,7 +23,6 @@ import { useShallow } from 'zustand/react/shallow';
 import { RepeatComponent } from '@gitroom/frontend/components/launches/repeat.component';
 import { TagsComponent } from '@gitroom/frontend/components/launches/tags.component';
 import { useToaster } from '@gitroom/react/toaster/toaster';
-import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -32,7 +31,7 @@ import { capitalize } from 'lodash';
 import { SelectCustomer } from '@gitroom/frontend/components/launches/select.customer';
 import { CopilotPopup } from '@copilotkit/react-ui';
 import { DummyCodeComponent } from '@gitroom/frontend/components/new-launch/dummy.code.component';
-import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
+import { CreationMethodBadge } from '@gitroom/frontend/components/launches/creation.method.badge';
 import {
   SettingsIcon,
   ChevronDownIcon,
@@ -44,13 +43,7 @@ import { useHasScroll } from '@gitroom/frontend/components/ui/is.scroll.hook';
 import { useShortlinkPreference } from '@gitroom/frontend/components/settings/shortlink-preference.component';
 import dayjs from 'dayjs';
 import { Button } from '@gitroom/react/form/button';
-
-function countCharacters(text: string, type: string): number {
-  if (type !== 'x') {
-    return text.length;
-  }
-  return weightedLength(text);
-}
+import { useClickOutside } from '@mantine/hooks';
 
 export const ManageModal: FC<AddEditModalProps> = (props) => {
   const t = useT();
@@ -61,6 +54,11 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
   const toaster = useToaster();
   const modal = useModals();
   const [showSettings, setShowSettings] = useState(false);
+  const [mobileTab, setMobileTab] = useState<'edit' | 'preview'>('edit');
+  const [showPostNow, setShowPostNow] = useState(false);
+  const postNowRef = useClickOutside<HTMLDivElement>(() => {
+    setShowPostNow(false);
+  });
   const { data: shortlinkPreferenceData } = useShortlinkPreference();
 
   const { addEditSets, mutate, customClose, dummy } = props;
@@ -200,19 +198,39 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
 
   const schedule = useCallback(
     (type: 'draft' | 'now' | 'schedule' | 'update') => async () => {
+      let republish = false;
       if (
         (type === 'now' || type === 'schedule') &&
         (existingData?.posts?.[0]?.state === 'PUBLISHED' ||
           (existingData?.posts?.[0]?.state === 'QUEUE' &&
             dayjs().isAfter(date.utc())))
       ) {
+        const channels = selectedIntegrations
+          .map((p) => p.integration.name)
+          .join(', ');
+        const isRecurring =
+          !!repeater || !!existingData?.posts?.[0]?.intervalInDays;
+
         const whatToDo = await new Promise((resolve) => {
           modal.openModal({
-            title: 'What do you want to do?',
+            title: t('what_do_you_want_to_do', 'What do you want to do?'),
             children: (
               <div className="flex flex-col">
                 <div className="text-[20px] mb-[20px]">
-                  This post was already published, what do you want to do?
+                  {t(
+                    'post_already_published_republish_warning',
+                    'This post was already published. Republishing will publish it again to'
+                  )}{' '}
+                  {channels} {t('republish_at', 'at')}{' '}
+                  {date.format('DD/MM/YYYY HH:mm')}.
+                  {isRecurring && (
+                    <div className="mt-[10px]">
+                      {t(
+                        'republish_recurring_note',
+                        'This is a recurring post: your changes apply to all future recurrences starting now.'
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="flex w-full gap-[10px]">
                   <div className="flex-1 flex">
@@ -221,7 +239,10 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                       className="flex-1"
                       onClick={() => resolve('update')}
                     >
-                      Just update the post details
+                      {t(
+                        'just_update_post_details',
+                        'Just update the post details'
+                      )}
                     </Button>
                   </div>
                   <div className="flex-1 flex">
@@ -230,7 +251,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                       className="flex-1"
                       onClick={() => resolve('republish')}
                     >
-                      Republish the post
+                      {t('republish_the_post', 'Republish the post')}
                     </Button>
                   </div>
                 </div>
@@ -242,93 +263,118 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
         if (whatToDo === 'update') {
           type = 'update';
         }
+
+        if (whatToDo === 'republish') {
+          republish = true;
+        }
       }
 
       setLoading(true);
-      const checkAllValid = await ref.current.checkAllValid();
 
-      const notEnoughChars = checkAllValid.filter((p: any) => {
-        return p.values.some((a: any) => {
-          return (
-            countCharacters(
-              stripHtmlValidation('normal', a.content, true),
-              p?.integration?.identifier || ''
-            ) === 0 && a.media?.length === 0
-          );
-        });
-      });
+      // Pull the local values to build the payload, but rely on the server
+      // (`/posts/valid`) for the actual validation — checkValidity now lives
+      // server-side so it can't be bypassed.
+      const allValues = await ref.current.getAllValues();
 
-      for (const item of notEnoughChars) {
-        toaster.show(
-          `${capitalize(item.integration.identifier.split('-')[0])} (${
-            item.integration.name
-          }):` +
-            ' ' +
-            t(
-              'post_needs_content_or_image',
-              'Your post should have at least one character or one image.'
-            ),
-          'warning'
-        );
-        setLoading(false);
-        item.preview();
-        return;
-      }
+      const integrationById = (id: string) =>
+        selectedIntegrations.find((p) => p.integration.id === id);
 
-      if (type !== 'draft') {
-        for (const item of checkAllValid) {
-          if (item.valid === false) {
-            toaster.show(
-              `${capitalize(item.integration.identifier.split('-')[0])} (${
-                item.integration.name
-              }): ${t('please_fix_your_settings', 'Please fix your settings')}`,
-              'warning'
-            );
-            item.fix();
-            setLoading(false);
-            setShowSettings(true);
-            return;
-          }
+      const group = existingData.group || makeId(10);
 
-          if (item.errors !== true) {
-            toaster.show(
-              `${capitalize(item.integration.identifier.split('-')[0])} (${
-                item.integration.name
-              }): ${item.errors}`,
-              'warning'
-            );
-            item.preview();
-            setLoading(false);
-            setShowSettings(false);
-            return;
-          }
-        }
+      const posts = allValues.map((post: any) => ({
+        integration: {
+          id: post.id,
+        },
+        group,
+        settings: { ...(post.settings || {}) },
+        value: post.values.map((value: any) => ({
+          ...(value.id ? { id: value.id } : {}),
+          content: value.content,
+          delay: value.delay || 0,
+          image:
+            (value?.media || []).map(
+              ({ id, path, alt, thumbnail, thumbnailTimestamp }: any) => ({
+                id,
+                path,
+                alt,
+                thumbnail,
+                thumbnailTimestamp,
+              })
+            ) || [],
+        })),
+      }));
 
-        const sliceNeeded = checkAllValid.filter((p: any) => {
-          return p.values.some((a: any) => {
-            const strip = stripHtmlValidation('normal', a.content, true);
-            const weightedLength = countCharacters(
-              strip,
-              p?.integration?.identifier || ''
-            );
-            const totalCharacters =
-              weightedLength > strip.length ? weightedLength : strip.length;
+      if (!dummy) {
+        const checkAllValid = await (
+          await fetch('/posts/valid', {
+            method: 'POST',
+            body: JSON.stringify({ type, posts }),
+          })
+        ).json();
 
-            return totalCharacters > (p.maximumCharacters || 1000000);
-          });
-        });
+        const focus = (id: string, where: 'fix' | 'preview') => {
+          integrationById(id)?.ref?.current?.[where]?.();
+        };
 
-        for (const item of sliceNeeded) {
+        const notEnoughChars = checkAllValid.filter((p: any) => p.emptyContent);
+
+        for (const item of notEnoughChars) {
           toaster.show(
-            `${item?.integration?.name} (${item?.integration?.identifier}) ${t(
-              'post_is_too_long',
-              'post is too long, please fix it'
-            )}`,
+            `${capitalize(item.identifier.split('-')[0])} (${item.name}):` +
+              ' ' +
+              t(
+                'post_needs_content_or_image',
+                'Your post should have at least one character or one image.'
+              ),
             'warning'
           );
-          item.preview();
           setLoading(false);
+          focus(item.id, 'preview');
           return;
+        }
+
+        if (type !== 'draft') {
+          for (const item of checkAllValid) {
+            if (item.valid === false) {
+              toaster.show(
+                `${capitalize(item.identifier.split('-')[0])} (${item.name}): ${
+                  item.settingsError ||
+                  t('please_fix_your_settings', 'Please fix your settings')
+                }`,
+                'warning'
+              );
+              focus(item.id, 'fix');
+              setLoading(false);
+              setShowSettings(true);
+              return;
+            }
+
+            if (item.errors !== true) {
+              toaster.show(
+                `${capitalize(item.identifier.split('-')[0])} (${item.name}): ${
+                  item.errors
+                }`,
+                'warning'
+              );
+              focus(item.id, 'preview');
+              setLoading(false);
+              setShowSettings(false);
+              return;
+            }
+
+            if (item.tooLong) {
+              toaster.show(
+                `${item.name} (${item.identifier}) ${t(
+                  'post_is_too_long',
+                  'post is too long, please fix it'
+                )}`,
+                'warning'
+              );
+              focus(item.id, 'preview');
+              setLoading(false);
+              return;
+            }
+          }
         }
       }
 
@@ -341,12 +387,12 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
           await fetch('/posts/should-shortlink', {
             method: 'POST',
             body: JSON.stringify({
-              messages: checkAllValid
+              messages: allValues
                 // platforms that remove links won't keep shortlinks either
-                .filter((p: any) => !p?.integration?.stripLinks)
-                .flatMap((p: any) =>
-                  p.values.flatMap((a: any) => a.content)
-                ),
+                .filter(
+                  (p: any) => !integrationById(p.id)?.integration?.stripLinks
+                )
+                .flatMap((p: any) => p.values.flatMap((a: any) => a.content)),
             }),
           })
         ).json();
@@ -362,41 +408,22 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                 'shortlink_urls_question',
                 'Do you want to shortlink the URLs? it will let you get statistics over clicks'
               ),
-              t('yes_shortlink_it', 'Yes, shortlink it!')
+              t('yes_shortlink_it', 'Yes, shortlink it!'),
+              undefined,
+              t('no_original_urls', 'No, original URLs')
             );
           }
         }
       }
 
-      const group = existingData.group || makeId(10);
       const data = {
         type,
+        ...(republish ? { republish } : {}),
         ...(repeater ? { inter: repeater } : {}),
         tags,
         shortLink,
         date: date.utc().format('YYYY-MM-DDTHH:mm:ss'),
-        posts: checkAllValid.map((post: any) => ({
-          integration: {
-            id: post.integration.id,
-          },
-          group,
-          settings: { ...(post.settings || {}) },
-          value: post.values.map((value: any) => ({
-            ...(value.id ? { id: value.id } : {}),
-            content: value.content,
-            delay: value.delay || 0,
-            image:
-              (value?.media || []).map(
-                ({ id, path, alt, thumbnail, thumbnailTimestamp }: any) => ({
-                  id,
-                  path,
-                  alt,
-                  thumbnail,
-                  thumbnailTimestamp,
-                })
-              ) || [],
-          })),
-        })),
+        posts,
       };
 
       if (dummy) {
@@ -416,12 +443,28 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
       }
 
       if (!dummy) {
-        addEditSets
-          ? addEditSets(data)
-          : await fetch('/posts', {
-              method: 'POST',
-              body: JSON.stringify(data),
-            });
+        if (addEditSets) {
+          addEditSets(data);
+        } else {
+          const response = await fetch('/posts', {
+            method: 'POST',
+            body: JSON.stringify(data),
+          });
+
+          if (!response.ok) {
+            if (response.status !== 402) {
+              const { message } = await response.json().catch(() => ({}));
+              toaster.show(
+                typeof message === 'string'
+                  ? message
+                  : t('post_save_failed', 'Could not save the post'),
+                'warning'
+              );
+            }
+            setLoading(false);
+            return;
+          }
+        }
 
         if (!addEditSets) {
           mutate();
@@ -446,20 +489,48 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
   );
 
   return (
-    <div className="w-full h-full flex-1 p-[40px] flex relative">
-      <div className="flex flex-1 bg-newBgColorInner rounded-[20px] flex-col">
-        <div className="flex-1 flex">
-          <div className="flex flex-col flex-1 border-e border-newBorder">
-            <div className="bg-newBgColor h-[65px] rounded-s-[20px] !rounded-b-[0] flex items-center px-[20px] text-[20px] font-[600]">
+    <div className="w-full h-full flex-1 p-[40px] mobile:p-0 mobile:h-auto mobile:min-h-full flex relative">
+      <div className="flex flex-1 min-w-0 bg-newBgColorInner rounded-[20px] mobile:rounded-none flex-col">
+        <div className="flex-1 flex mobile:contents">
+          <div className="flex flex-col flex-1 min-w-0 border-e border-newBorder mobile:border-e-0 mobile:flex-none">
+            <div className="bg-newBgColor h-[65px] rounded-s-[20px] !rounded-b-[0] mobile:rounded-none flex items-center gap-[12px] px-[20px] mobile:px-[16px] text-[20px] font-[600]">
               {t('create_post_title', 'Create Post')}
+              <CreationMethodBadge
+                creationMethod={existingData?.posts?.[0]?.creationMethod}
+                size="sm"
+              />
+              <div className="hidden mobile:block ms-auto cursor-pointer">
+                <CloseIcon onClick={askClose} className="text-[#A3A3A3]" />
+              </div>
             </div>
-            <div className="flex-1 flex flex-col gap-[16px]">
+            <div className="hidden mobile:flex mx-[12px] mt-[12px] p-[4px] border border-newTableBorder rounded-[8px] text-[14px] font-[500]">
+              {(['edit', 'preview'] as const).map((tab) => (
+                <div
+                  key={tab}
+                  onClick={() => setMobileTab(tab)}
+                  className={clsx(
+                    'flex-1 pt-[6px] pb-[5px] cursor-pointer text-center rounded-[6px]',
+                    mobileTab === tab && 'text-textItemFocused bg-boxFocused'
+                  )}
+                >
+                  {tab === 'edit'
+                    ? t('edit', 'Edit')
+                    : t('post_preview', 'Post Preview')}
+                </div>
+              ))}
+            </div>
+            <div
+              className={clsx(
+                'flex-1 flex flex-col gap-[16px]',
+                mobileTab === 'preview' && 'mobile:hidden'
+              )}
+            >
               <div
                 className={clsx('flex-1 relative', showSettings && 'hidden')}
               >
                 <div
                   id="social-content"
-                  className="gap-[32px] flex flex-col pe-[8px] pt-[20px] ps-[20px] absolute top-0 left-0 w-full h-full overflow-x-hidden overflow-y-scroll scrollbar scrollbar-thumb-newColColor scrollbar-track-newBgColorInner"
+                  className="gap-[32px] flex flex-col pe-[8px] pt-[20px] ps-[20px] mobile:px-[12px] mobile:static absolute top-0 left-0 w-full h-full mobile:h-auto overflow-x-hidden overflow-y-scroll mobile:overflow-y-visible scrollbar scrollbar-thumb-newColColor scrollbar-track-newBgColorInner"
                 >
                   <div className="flex w-full">
                     <div className="flex flex-1">
@@ -492,7 +563,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
               <div
                 id="wrapper-settings"
                 className={clsx(
-                  'pb-[20px] px-[20px] select-none',
+                  'pb-[20px] px-[20px] mobile:px-[12px] select-none',
                   showSettings && 'flex-1 flex pt-[20px]',
                   current === 'global' && 'hidden'
                 )}
@@ -521,7 +592,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                       'text-[14px] text-textColor font-[500] relative'
                     )}
                   >
-                    <div className="absolute left-0 top-0 w-full h-full flex flex-col overflow-x-hidden overflow-y-auto scrollbar scrollbar-thumb-newBgColorInner scrollbar-track-newColColor">
+                    <div className="absolute mobile:static left-0 top-0 w-full h-full mobile:h-auto flex flex-col overflow-x-hidden overflow-y-auto scrollbar scrollbar-thumb-newBgColorInner scrollbar-track-newColColor">
                       <div
                         id="social-settings"
                         className="flex flex-col gap-[20px] bg-newBgColor"
@@ -535,25 +606,35 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
               </div>
             </div>
           </div>
-          <div className="w-[580px] flex flex-col">
-            <div className="bg-newBgColor h-[65px] rounded-e-[20px] !rounded-b-[0] flex items-center px-[20px] text-[20px] font-[600]">
+          <div
+            className={clsx(
+              'w-[580px] tablet:w-[440px] mobile:!w-full flex flex-col mobile:order-3 mobile:flex-1',
+              mobileTab === 'edit' && 'mobile:hidden'
+            )}
+          >
+            <div className="bg-newBgColor h-[65px] rounded-e-[20px] !rounded-b-[0] mobile:hidden flex items-center px-[20px] text-[20px] font-[600]">
               <div className="flex-1">{t('post_preview', 'Post Preview')}</div>
-              <div className="cursor-pointer">
+              <div className="cursor-pointer mobile:hidden">
                 <CloseIcon onClick={askClose} className="text-[#A3A3A3]" />
               </div>
             </div>
             <div className="flex-1 relative">
               <Scrollable
                 scrollClasses="!pe-[20px]"
-                className="absolute top-0 p-[20px] pe-[8px] left-0 w-full h-full overflow-x-hidden overflow-y-scroll scrollbar scrollbar-thumb-newColColor scrollbar-track-newBgColorInner"
+                className="absolute mobile:static top-0 p-[20px] pe-[8px] mobile:p-[12px] left-0 w-full h-full mobile:h-auto overflow-x-hidden overflow-y-scroll mobile:overflow-y-visible scrollbar scrollbar-thumb-newColColor scrollbar-track-newBgColorInner"
               >
                 <ShowAllProviders ref={ref} />
               </Scrollable>
             </div>
           </div>
         </div>
-        <div className="select-none h-[84px] py-[20px] border-t border-newBorder flex items-center">
-          <div className="flex-1 flex ps-[20px] gap-[8px]">
+        <div className="select-none h-[84px] py-[20px] border-t border-newBorder flex items-center mobile:contents">
+          <div
+            className={clsx(
+              'flex-1 flex ps-[20px] gap-[8px] mobile:order-2 mobile:flex-wrap mobile:flex-none mobile:p-[12px]',
+              mobileTab === 'preview' && 'mobile:hidden'
+            )}
+          >
             {!dummy && (
               <TagsComponent
                 name="tags"
@@ -569,7 +650,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
               <RepeatComponent repeat={repeater} onChange={setRepeater} />
             )}
           </div>
-          <div className="pe-[20px] flex items-center justify-end gap-[8px]">
+          <div className="pe-[20px] flex items-center justify-end gap-[8px] mobile:order-4 mobile:sticky mobile:bottom-0 mobile:z-[20] mobile:mt-auto mobile:flex-wrap mobile:p-[12px] mobile:bg-newBgColorInner mobile:border-t mobile:border-newBorder">
             {existingData?.integration && (
               <button
                 onClick={deletePost}
@@ -602,7 +683,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
             )}
             {addEditSets && (
               <button
-                className="text-white text-[15px] font-[600] min-w-[180px] btnSub disabled:cursor-not-allowed disabled:opacity-80 outline-none gap-[8px] flex justify-center items-center h-[44px] rounded-[8px] bg-[#612BD3] ps-[20px] pe-[16px]"
+                className="text-white text-[15px] font-[600] min-w-[180px] mobile:basis-full btnSub disabled:cursor-not-allowed disabled:opacity-80 outline-none gap-[8px] flex justify-center items-center h-[44px] rounded-[8px] bg-[#612BD3] ps-[20px] pe-[16px]"
                 disabled={
                   selectedIntegrations.length === 0 || loading || locked
                 }
@@ -612,13 +693,16 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
               </button>
             )}
             {!addEditSets && (
-              <div className="group cursor-pointer relative">
+              <div
+                ref={postNowRef}
+                className="group cursor-pointer relative mobile:basis-full"
+              >
                 <button
                   disabled={
                     selectedIntegrations.length === 0 || loading || locked
                   }
                   onClick={schedule('schedule')}
-                  className="text-white relative min-w-[180px] btnSub disabled:cursor-not-allowed disabled:opacity-80 outline-none gap-[8px] flex justify-center items-center h-[44px] rounded-[8px] bg-[#612BD3] ps-[20px] pe-[16px]"
+                  className="text-white relative min-w-[180px] mobile:w-full btnSub disabled:cursor-not-allowed disabled:opacity-80 outline-none gap-[8px] flex justify-center items-center h-[44px] rounded-[8px] bg-[#612BD3] ps-[20px] pe-[16px]"
                 >
                   {loading && (
                     <div className="absolute left-[50%] top-[50%] -translate-y-[50%] -translate-x-[50%]">
@@ -627,7 +711,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                   )}
                   <div
                     className={clsx(
-                      'text-[15px] font-[600]',
+                      'text-[15px] font-[600] mobile:flex-1',
                       loading && 'invisible'
                     )}
                   >
@@ -642,8 +726,19 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                       : t('update', 'Update')}
                   </div>
                   {!dummy && (
-                    <div className="flex justify-center items-center h-[20px] w-[20px] pt-[4px] arrow-change">
-                      <DropdownArrowSmallIcon className="group-hover:rotate-180 text-white" />
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowPostNow(!showPostNow);
+                      }}
+                      className="flex justify-center items-center h-[20px] w-[20px] pt-[4px] mobile:pt-0 mobile:h-[44px] mobile:w-[44px] mobile:-me-[16px] mobile:border-s mobile:border-white/20 arrow-change"
+                    >
+                      <DropdownArrowSmallIcon
+                        className={clsx(
+                          'group-hover:rotate-180 text-white',
+                          showPostNow && 'rotate-180'
+                        )}
+                      />
                     </div>
                   )}
                 </button>
@@ -654,7 +749,10 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
                     disabled={
                       selectedIntegrations.length === 0 || loading || locked
                     }
-                    className="rounded-[8px] z-[300] disabled:cursor-not-allowed disabled:opacity-80 hidden group-hover:flex absolute bottom-[100%] -left-[12px] p-[12px] w-[206px] bg-newBgColorInner"
+                    className={clsx(
+                      'rounded-[8px] z-[300] disabled:cursor-not-allowed disabled:opacity-80 absolute bottom-[100%] -left-[12px] mobile:left-0 p-[12px] mobile:px-0 w-[206px] mobile:w-full bg-newBgColorInner',
+                      showPostNow ? 'flex' : 'hidden group-hover:flex'
+                    )}
                   >
                     <div className="text-white rounded-[8px] bg-[#D82D7E] h-[44px] w-full flex justify-center items-center post-now">
                       {t('post_now', 'Post Now')}
@@ -667,6 +765,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
         </div>
       </div>
       <CopilotPopup
+        className="mobile:!bottom-[136px]"
         hitEscapeToClose={false}
         clickOutsideToClose={true}
         instructions={`

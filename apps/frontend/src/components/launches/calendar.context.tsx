@@ -26,6 +26,8 @@ import { expandPostsList, expandPosts } from '@gitroom/helpers/utils/posts.list.
 extend(isoWeek);
 extend(weekOfYear);
 
+export type ListStateFilter = 'all' | 'scheduled' | 'draft' | 'published';
+
 export const CalendarContext = createContext({
   startDate: newDayjs().startOf('isoWeek').format('YYYY-MM-DD'),
   endDate: newDayjs().endOf('isoWeek').format('YYYY-MM-DD'),
@@ -76,6 +78,10 @@ export const CalendarContext = createContext({
   listPage: 0,
   listTotalPages: 0,
   setListPage: (page: number) => {
+    /** empty **/
+  },
+  listState: 'all' as ListStateFilter,
+  setListState: (state: ListStateFilter) => {
     /** empty **/
   },
 });
@@ -139,11 +145,23 @@ export const CalendarWeekProvider: FC<{
   const [internalData, setInternalData] = useState([] as any[]);
   const [trendings] = useState<string[]>([]);
   const searchParams = useSearchParams();
-  const [displaySaved, setDisplaySaved] = useCookie('calendar-display', 'week');
+  // A 7-column week doesn't fit a phone, so default small screens (tailwind `mobile`) to the day view
+  const [displaySaved, setDisplaySaved] = useCookie(
+    'calendar-display',
+    typeof window !== 'undefined' &&
+      window.matchMedia('(max-width: 1025px)').matches
+      ? 'day'
+      : 'week'
+  );
   const display = searchParams.get('display') || displaySaved;
 
   // List view state
   const [listPage, setListPage] = useState(0);
+  const [listState, setListStateRaw] = useState<ListStateFilter>('all');
+  const setListState = useCallback((next: ListStateFilter) => {
+    setListStateRaw(next);
+    setListPage(0);
+  }, []);
 
   // Initialize with current date range based on URL params or defaults
   const initStartDate = searchParams.get('startDate');
@@ -190,8 +208,9 @@ export const CalendarWeekProvider: FC<{
       page: listPage.toString(),
       limit: '100',
       customer: filters?.customer?.toString() || '',
+      state: listState,
     }).toString();
-  }, [listPage, filters.customer]);
+  }, [listPage, filters.customer, listState]);
 
   const loadListData = useCallback(async () => {
     const response = await fetch(`/posts/list?${listParams}`);
@@ -341,6 +360,8 @@ export const CalendarWeekProvider: FC<{
         listPage,
         listTotalPages,
         setListPage,
+        listState,
+        setListState,
       }}
     >
       {children}

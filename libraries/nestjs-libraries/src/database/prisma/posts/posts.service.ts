@@ -1,13 +1,21 @@
 import {
   BadRequestException,
   Injectable,
+  NotFoundException,
   ValidationPipe,
 } from '@nestjs/common';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import dayjs from 'dayjs';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
-import { Integration, Post, Media, From, State } from '@prisma/client';
+import {
+  Integration,
+  Post,
+  Media,
+  From,
+  CreationMethod,
+  State,
+} from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.list.dto';
 import { shuffle } from 'lodash';
@@ -40,7 +48,14 @@ import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 import { stripLinks } from '@gitroom/helpers/utils/strip.links';
+import { validate } from 'class-validator';
+import { plainToInstance } from 'class-transformer';
+import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
+import { postContentPlainText } from '@gitroom/helpers/utils/sanitize.post.content';
+import { CreatePublicCommentDto } from '@gitroom/nestjs-libraries/dtos/comments/add.comment.dto';
+import { countLength } from '@gitroom/helpers/utils/count.length';
 
 type PostWithConditionals = Post & {
   integration?: Integration;
@@ -133,8 +148,43 @@ export class PostsService {
     return this._postRepository.getPostById(postId, orgId);
   }
 
+  async getPostTimeline(postId: string, orgId: string) {
+    return this._postRepository.getPostTimeline(postId, orgId);
+  }
+
   async updateReleaseId(orgId: string, postId: string, releaseId: string) {
     return this._postRepository.updateReleaseId(postId, orgId, releaseId);
+  }
+
+  async resolveRelease(
+    orgId: string,
+    post: {
+      id: string;
+      releaseId: string;
+      releaseURL: string;
+      integration: Integration;
+    }
+  ) {
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      post.integration.providerIdentifier
+    );
+
+    const resolved = await integrationProvider.resolveReleaseId?.(
+      post.integration.token,
+      post.releaseId,
+      post.integration
+    );
+    if (!resolved || resolved.postId === post.releaseId) {
+      return { releaseId: post.releaseId, releaseURL: post.releaseURL };
+    }
+
+    await this._postRepository.updateResolvedRelease(
+      post.id,
+      orgId,
+      resolved.postId,
+      resolved.releaseURL
+    );
+    return { releaseId: resolved.postId, releaseURL: resolved.releaseURL };
   }
 
   async checkPostAnalytics(
@@ -195,10 +245,12 @@ export class PostsService {
     // }
 
     try {
+      const { releaseId } = await this.resolveRelease(orgId, post);
+
       const loadAnalytics = await integrationProvider.postAnalytics(
         getIntegration.internalId,
         getIntegration.token,
-        post.releaseId,
+        releaseId,
         date
       );
       await ioRedis.set(
@@ -243,9 +295,9 @@ export class PostsService {
 
     const mappedValues = {
       ...body,
-      type: replaceDraft ? 'schedule' : body.type,
+      type: replaceDraft ? 'schedule' : body?.type,
       posts: await Promise.all(
-        body.posts.map(async (post) => {
+        body?.posts?.map(async (post) => {
           const integration = await this._integrationService.getIntegrationById(
             organization,
             post.integration.id
@@ -258,14 +310,14 @@ export class PostsService {
           }
 
           return {
-            type: replaceDraft ? 'schedule' : body.type,
+            type: replaceDraft ? 'schedule' : body?.type,
             ...post,
             settings: {
               ...(post.settings || ({} as any)),
               __type: integration.providerIdentifier,
             },
           };
-        })
+        }) || []
       ),
     };
 
@@ -336,9 +388,21 @@ export class PostsService {
         (
           await Promise.all(
             (imagesList || []).map(async (p: any) => {
-              if (!p.path && p.id) {
+              if (!p.id) {
+                return p;
+              }
+
+              if (!p.path) {
                 imageUpdateNeeded = true;
                 return this._mediaService.getMediaById(p.id);
+              }
+
+              // the normalizer may have replaced the file after the post was
+              // composed; a record still processing publishes the original
+              const fresh = await this._mediaService.getMediaById(p.id);
+              if (fresh?.status === 'ready' && fresh.path !== p.path) {
+                imageUpdateNeeded = true;
+                return { ...p, name: fresh.name, path: fresh.path };
               }
 
               return p;
@@ -367,7 +431,7 @@ export class PostsService {
               return m;
             }
 
-            if (m.path.indexOf('.png') > -1) {
+            if (hasExtension(m.path, 'png')) {
               imageUpdateNeeded = true;
               const response = await axios.get(m.url, {
                 responseType: 'arraybuffer',
@@ -479,6 +543,9 @@ export class PostsService {
     const convertToJPEG = false;
     const loadAll = await this._postRepository.getPostsByGroup(orgId, group);
     const posts = this.arrangePostsByGroup(loadAll, undefined);
+    if (!posts.length) {
+      throw new NotFoundException('Post not found');
+    }
 
     return {
       group: posts?.[0]?.group,
@@ -675,8 +742,8 @@ export class PostsService {
     return this._postRepository.countPostsFromDay(orgId, date);
   }
 
-  getPostByForWebhookId(id: string) {
-    return this._postRepository.getPostByForWebhookId(id);
+  getPostByForWebhookId(id: string, integrationId: string) {
+    return this._postRepository.getPostByForWebhookId(id, integrationId);
   }
 
   async startWorkflow(
@@ -714,7 +781,7 @@ export class PostsService {
     try {
       await this._temporalService.client
         .getRawClient()
-        ?.workflow.start('postWorkflowV105', {
+        ?.workflow.start('postWorkflowV112', {
           workflowId: `post_${postId}`,
           taskQueue: 'main',
           workflowIdConflictPolicy: 'TERMINATE_EXISTING',
@@ -739,9 +806,175 @@ export class PostsService {
     } catch (err) {}
   }
 
-  async createPost(orgId: string, body: CreatePostDto): Promise<any[]> {
+  /**
+   * Server-side validation that used to live on the client (`checkValidity` +
+   * the manage modal loop). Runs the provider's settings DTO validation, the
+   * provider `checkValidity` (media rules) and the empty-content / too-long
+   * character checks. Returns one result per post so the frontend can show the
+   * same toasts it did before — and so `/posts` can refuse to create invalid
+   * posts.
+   */
+  async validatePosts(
+    orgId: string,
+    posts: Array<{
+      integration: { id: string };
+      value: Array<{
+        content?: string;
+        image?: Array<{ path: string; thumbnail?: string }>;
+      }>;
+      settings?: any;
+    }>
+  ) {
+    return Promise.all(
+      (posts || []).map(async (post) => {
+        const integration = await this._integrationService.getIntegrationById(
+          orgId,
+          post?.integration?.id
+        );
+
+        if (!integration) {
+          throw new BadRequestException(
+            `Integration with id ${post?.integration?.id} not found`
+          );
+        }
+
+        const provider = this._integrationManager.getSocialIntegration(
+          integration.providerIdentifier
+        );
+
+        let additionalSettings: any[] = [];
+        try {
+          additionalSettings = JSON.parse(
+            integration.additionalSettings || '[]'
+          );
+        } catch {
+          additionalSettings = [];
+        }
+
+        const settings = post.settings || {};
+        const media = (post.value || []).map((p) => p.image || []);
+
+        // Settings DTO validation — mirrors the client `form.trigger()`.
+        let valid = true;
+        let settingsError = '';
+        if (provider?.dto) {
+          const instance = plainToInstance(provider.dto, settings, {
+            enableImplicitConversion: false,
+          });
+          const validationErrors = await validate(instance as object, {
+            skipMissingProperties: false,
+          });
+          settingsError = this.firstValidationError(validationErrors);
+          valid = validationErrors.length === 0;
+        }
+
+        // Provider-specific media validation (the old client `checkValidity`).
+        let errors: string | true = true;
+        try {
+          errors = await provider.checkValidity(
+            media,
+            settings,
+            additionalSettings
+          );
+        } catch (err: any) {
+          errors = err?.message || 'Invalid media';
+        }
+
+        const maximumCharacters = provider.maxLength(
+          additionalSettings,
+          settings
+        );
+
+        const emptyContent = (post.value || []).some((a) => {
+          const strip = stripHtmlValidation('normal', a.content || '', true);
+          const length = countLength(integration.providerIdentifier, strip);
+          return length === 0 && (a.image || []).length === 0;
+        });
+
+        const tooLong = (post.value || []).some((a) => {
+          const strip = stripHtmlValidation('normal', a.content || '', true);
+          const counted = countLength(integration.providerIdentifier, strip);
+          return counted > (maximumCharacters || 1000000);
+        });
+
+        return {
+          id: integration.id,
+          identifier: integration.providerIdentifier,
+          name: integration.name,
+          valid,
+          settingsError,
+          errors,
+          emptyContent,
+          tooLong,
+          maximumCharacters,
+        };
+      })
+    );
+  }
+
+  /** Returns the first class-validator message (incl. nested children), or ''. */
+  private firstValidationError(errors: any[]): string {
+    for (const e of errors || []) {
+      if (e?.constraints) {
+        return Object.values(e.constraints as Record<string, string>)[0] || '';
+      }
+      const child = e?.children?.length
+        ? this.firstValidationError(e.children)
+        : '';
+      if (child) {
+        return child;
+      }
+    }
+    return '';
+  }
+
+  // A schedule-type save targeting an already-PUBLISHED post republishes it to
+  // the platform: require the explicit `republish` opt-in instead. The message
+  // doubles as the confirmation dialog for API/MCP automation.
+  private guardAgainstRepublish(
+    post: {
+      state: State;
+      publishDate: Date;
+      integration?: { providerIdentifier: string };
+    } | null,
+    source: 'createPost' | 'changeDate'
+  ) {
+    if (post?.state !== 'PUBLISHED') {
+      return;
+    }
+
+    const howToUpdate =
+      source === 'createPost' ? `use type 'update'` : `use action 'update'`;
+
+    throw new BadRequestException(
+      `This post was already published on ${dayjs
+        .utc(post.publishDate)
+        .format(
+          'YYYY-MM-DD HH:mm'
+        )} UTC. Saving it this way would publish it again to ${
+        post.integration?.providerIdentifier || 'the channel'
+      }. To edit without republishing, ${howToUpdate}. To intentionally publish again, pass republish: true.`
+    );
+  }
+
+  async createPost(
+    orgId: string,
+    body: CreatePostDto,
+    creationMethod: CreationMethod,
+    keepGroup = false
+  ): Promise<any[]> {
     const postList = [];
     for (const post of body.posts) {
+      if (
+        (body.type === 'schedule' || body.type === 'now') &&
+        !body.republish &&
+        post.value?.[0]?.id
+      ) {
+        this.guardAgainstRepublish(
+          await this._postRepository.getPostById(post.value[0].id, orgId),
+          'createPost'
+        );
+      }
       const provider = this._integrationManager.getSocialIntegration(
         (post.settings as any)?.__type
       );
@@ -768,12 +1001,19 @@ export class PostsService {
         body.type === 'now' ? dayjs().format('YYYY-MM-DDTHH:mm:00') : body.date,
         post,
         body.tags,
-        body.inter
+        creationMethod,
+        body.inter,
+        keepGroup
       );
 
       if (!posts?.length) {
         return [] as any[];
       }
+
+      const existingIds = (post.value || []).map((p) => p.id).filter(Boolean);
+      await this.detachStaleAnchors(
+        posts.filter((p) => existingIds.includes(p.id))
+      );
 
       if (body.type !== 'update') {
         this.startWorkflow(
@@ -792,6 +1032,153 @@ export class PostsService {
     }
 
     return postList;
+  }
+
+  // Update ONLY the provider settings of a not-yet-published post (scheduled or
+  // draft). The passed keys are merged into the existing settings; content and
+  // publish date stay as they are, so the running publish workflow is left
+  // untouched (type "update"). Shared by the agent/MCP tool and the public API
+  // PUT /posts/:id/settings so both go through one path.
+  async updatePostSettings(
+    orgId: string,
+    postId: string,
+    settings: Record<string, any>,
+    creationMethod: CreationMethod
+  ): Promise<{ postId: string; publishDate: string }> {
+    // Ordered as post -> comments, root includes integration and tags.
+    const ordered = await this.getPostsRecursively(postId, true, orgId, true);
+
+    const [root] = ordered;
+    if (!root) {
+      throw new NotFoundException('Post not found');
+    }
+
+    if (root.parentPostId) {
+      throw new BadRequestException(
+        'This id belongs to a comment, pass the id of the main post'
+      );
+    }
+
+    if (root.state !== 'QUEUE' && root.state !== 'DRAFT') {
+      throw new BadRequestException(
+        'Only scheduled posts that were not published yet (or drafts) can be updated'
+      );
+    }
+
+    if (
+      root.state === 'QUEUE' &&
+      dayjs.utc(root.publishDate).isBefore(dayjs.utc())
+    ) {
+      throw new BadRequestException(
+        'The publish time of this post already passed, it cannot be updated'
+      );
+    }
+
+    const integration = (root as any).integration;
+
+    let existingSettings: Record<string, any>;
+    try {
+      existingSettings = JSON.parse(root.settings || '{}');
+    } catch (err) {
+      existingSettings = {};
+    }
+
+    // Merge: only the passed keys change, everything else stays.
+    const mergedSettings = {
+      ...existingSettings,
+      ...(settings || {}),
+      __type: integration.providerIdentifier,
+    };
+
+    // Keep the existing content/ids so the posts are updated in place (the
+    // workflow identity is preserved) - only the settings differ.
+    const value = ordered.map((p) => {
+      let image = [];
+      try {
+        image = JSON.parse(p.image || '[]');
+      } catch (err) {}
+      return {
+        id: p.id,
+        content: p.content,
+        delay: p.delay || 0,
+        image,
+      };
+    });
+
+    // Same server-side validation as the dashboard / public create route.
+    const [validation] = await this.validatePosts(orgId, [
+      {
+        integration: { id: integration.id },
+        settings: mergedSettings,
+        value: value.map((p) => ({ content: p.content, image: p.image })),
+      },
+    ]);
+
+    if (validation.emptyContent) {
+      throw new BadRequestException(
+        `${validation.name}: Your post should have at least one character or one image.`
+      );
+    }
+
+    if (root.state !== 'DRAFT') {
+      if (!validation.valid) {
+        throw new BadRequestException(
+          `${validation.name}: ${
+            validation.settingsError || 'Please fix your settings'
+          }`
+        );
+      }
+
+      if (validation.errors !== true) {
+        throw new BadRequestException(
+          `${validation.name}: ${validation.errors}`
+        );
+      }
+
+      if (validation.tooLong) {
+        throw new BadRequestException(
+          `${validation.name}: The maximum characters is ${validation.maximumCharacters}`
+        );
+      }
+    }
+
+    const date = dayjs.utc(root.publishDate).format('YYYY-MM-DDTHH:mm:ss');
+
+    const [output] = await this.createPost(
+      orgId,
+      {
+        date,
+        // Settings-only update: keep the current state and leave the running
+        // publish workflow alone.
+        type: 'update',
+        shortLink: false,
+        tags: ((root as any).tags || []).map((t: any) => ({
+          value: t.tag.name,
+          label: t.tag.name,
+        })),
+        posts: [
+          {
+            integration,
+            group: root.group,
+            settings: mergedSettings,
+            value,
+          },
+        ],
+      } as any,
+      creationMethod,
+      // Keep the group stable: a client may have the calendar open while the
+      // settings are updated out of band, and the calendar links posts by group.
+      true
+    );
+
+    if (!output) {
+      throw new BadRequestException('Failed to update the post');
+    }
+
+    return {
+      postId: output.postId,
+      publishDate: date,
+    };
   }
 
   async separatePosts(content: string, len: number) {
@@ -831,9 +1218,14 @@ export class PostsService {
     orgId: string,
     id: string,
     date: string,
-    action: 'schedule' | 'update' = 'schedule'
+    action: 'schedule' | 'update' = 'schedule',
+    republish = false
   ) {
     const getPostById = await this._postRepository.getPostById(id, orgId);
+
+    if (action === 'schedule' && !republish) {
+      this.guardAgainstRepublish(getPostById, 'changeDate');
+    }
 
     // schedule: Set status to QUEUE and change date (reschedule the post)
     // update: Just change the date without changing the status
@@ -901,43 +1293,47 @@ export class PostsService {
         const group = makeId(10);
         const randomDate = findTime();
 
-        await this.createPost(orgId, {
-          type: 'draft',
-          date: randomDate,
-          order: '',
-          shortLink: false,
-          tags: [],
-          posts: [
-            {
-              group,
-              integration: {
-                id: integration.id,
-              },
-              settings: {
-                __type: integration.providerIdentifier as any,
-                title: '',
-                tags: [],
-                subreddit: [],
-              },
-              value: [
-                ...toPost.list.map((l) => ({
-                  id: '',
-                  content: l.post,
-                  delay: 0,
-                  image: [],
-                })),
-                {
-                  id: '',
-                  delay: 0,
-                  content: `Check out the full story here:\n${
-                    body.postId || body.url
-                  }`,
-                  image: [],
+        await this.createPost(
+          orgId,
+          {
+            type: 'draft',
+            date: randomDate,
+            order: '',
+            shortLink: false,
+            tags: [],
+            posts: [
+              {
+                group,
+                integration: {
+                  id: integration.id,
                 },
-              ],
-            },
-          ],
-        });
+                settings: {
+                  __type: integration.providerIdentifier as any,
+                  title: '',
+                  tags: [],
+                  subreddit: [],
+                },
+                value: [
+                  ...toPost.list.map((l) => ({
+                    id: '',
+                    content: l.post,
+                    delay: 0,
+                    image: [],
+                  })),
+                  {
+                    id: '',
+                    delay: 0,
+                    content: `Check out the full story here:\n${
+                      body.postId || body.url
+                    }`,
+                    image: [],
+                  },
+                ],
+              },
+            ],
+          },
+          'WEB'
+        );
       }
     }
   }
@@ -1000,8 +1396,170 @@ export class PostsService {
     return date.clone().add(num, 'minutes').format('YYYY-MM-DDTHH:mm:00');
   }
 
-  getComments(postId: string) {
-    return this._postRepository.getComments(postId);
+  async getComments(previewId: string) {
+    const posts = await this.getPostsRecursively(previewId, false);
+    const comments = await this._postRepository.getCommentsForPosts(
+      posts.map((p) => p.id)
+    );
+
+    return comments.map((comment) => ({
+      id: comment.id,
+      postId: comment.postId,
+      parentId: comment.parentId,
+      content: comment.content,
+      anchorStart: comment.anchorStart,
+      anchorEnd: comment.anchorEnd,
+      anchorQuote: comment.anchorQuote,
+      resolvedAt: comment.resolvedAt,
+      createdAt: comment.createdAt,
+      name: comment.userId
+        ? [comment.user?.name, comment.user?.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || null
+        : comment.displayName,
+    }));
+  }
+
+  async createPublicComment(
+    previewId: string,
+    body: CreatePublicCommentDto,
+    userId: string | null,
+    ip: string
+  ) {
+    const posts = await this.getPostsRecursively(previewId, false);
+    if (!posts.length) {
+      throw new NotFoundException('Post not found');
+    }
+
+    let post = body.postId ? posts.find((p) => p.id === body.postId) : posts[0];
+    if (!post) {
+      throw new BadRequestException('Post does not belong to this preview');
+    }
+
+    if (!userId) {
+      if (!body.displayName?.trim()) {
+        throw new BadRequestException('Name is required');
+      }
+      await this.verifyRecaptcha(body.recaptchaToken, ip);
+    }
+
+    const hasStart = typeof body.anchorStart === 'number';
+    const hasEnd = typeof body.anchorEnd === 'number';
+    if (hasStart !== hasEnd) {
+      throw new BadRequestException('Both anchor offsets are required');
+    }
+
+    if (body.parentId) {
+      const parent = await this._postRepository.getCommentById(body.parentId);
+      if (!parent || !posts.some((p) => p.id === parent.postId)) {
+        throw new BadRequestException('Parent comment not found');
+      }
+      if (parent.parentId) {
+        throw new BadRequestException(
+          'Replies can only be added to a root comment'
+        );
+      }
+      if (hasStart || body.anchorQuote) {
+        throw new BadRequestException('Replies cannot be anchored');
+      }
+      post = posts.find((p) => p.id === parent.postId)!;
+    }
+
+    if (hasStart) {
+      const plainText = postContentPlainText(post.content);
+      if (
+        body.anchorStart! < 0 ||
+        body.anchorStart! >= body.anchorEnd! ||
+        body.anchorEnd! > plainText.length
+      ) {
+        throw new BadRequestException('Anchor is out of range');
+      }
+      if (
+        body.anchorQuote !== plainText.slice(body.anchorStart!, body.anchorEnd!)
+      ) {
+        throw new BadRequestException('Anchor does not match the post text');
+      }
+    }
+
+    return this._postRepository.createComment(
+      post.organizationId,
+      userId,
+      post.id,
+      body.content,
+      {
+        displayName: userId ? undefined : body.displayName!.trim(),
+        parentId: body.parentId,
+        anchorStart: hasStart ? body.anchorStart : undefined,
+        anchorEnd: hasStart ? body.anchorEnd : undefined,
+        anchorQuote: hasStart ? body.anchorQuote : undefined,
+      }
+    );
+  }
+
+  private async verifyRecaptcha(token: string | undefined, ip: string) {
+    if (!process.env.RECAPTCHA_SECRET_KEY) {
+      return;
+    }
+
+    if (!token) {
+      throw new BadRequestException('Captcha verification failed');
+    }
+
+    const result = await (
+      await fetch('https://www.google.com/recaptcha/api/siteverify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          secret: process.env.RECAPTCHA_SECRET_KEY,
+          response: token,
+          remoteip: ip,
+        }),
+      })
+    ).json();
+
+    if (!result?.success) {
+      throw new BadRequestException('Captcha verification failed');
+    }
+  }
+
+  async resolveComment(orgId: string, commentId: string, resolved: boolean) {
+    const comment = await this._postRepository.getCommentById(commentId);
+    if (!comment || comment.post.organizationId !== orgId) {
+      throw new NotFoundException('Comment not found');
+    }
+    if (comment.parentId) {
+      throw new BadRequestException('Only root comments can be resolved');
+    }
+
+    return this._postRepository.setCommentResolved(
+      commentId,
+      resolved ? new Date() : null
+    );
+  }
+
+  // A comment anchored to a span of text keeps its quote but loses the
+  // highlight once the span no longer reads the same on the new content.
+  async detachStaleAnchors(posts: { id: string; content: string }[]) {
+    for (const post of posts) {
+      const anchored = await this._postRepository.getAnchoredCommentsForPost(
+        post.id
+      );
+      if (!anchored.length) {
+        continue;
+      }
+
+      const plainText = postContentPlainText(post.content);
+      const stale = anchored
+        .filter(
+          (c) => c.anchorQuote !== plainText.slice(c.anchorStart!, c.anchorEnd!)
+        )
+        .map((c) => c.id);
+
+      if (stale.length) {
+        await this._postRepository.detachAnchorsForPost(post.id, stale);
+      }
+    }
   }
 
   getTags(orgId: string) {
@@ -1018,14 +1576,5 @@ export class PostsService {
 
   deleteTag(id: string, orgId: string) {
     return this._postRepository.deleteTag(id, orgId);
-  }
-
-  createComment(
-    orgId: string,
-    userId: string,
-    postId: string,
-    comment: string
-  ) {
-    return this._postRepository.createComment(orgId, userId, postId, comment);
   }
 }

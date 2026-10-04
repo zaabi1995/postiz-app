@@ -76,6 +76,7 @@ export const Menu: FC<{
     if (show && menuRef.current) {
       const menuRect = menuRef.current.getBoundingClientRect();
       const viewportHeight = window.innerHeight;
+      const viewportWidth = window.innerWidth;
       const padding = 10;
 
       // Check if menu overflows bottom of viewport
@@ -87,6 +88,14 @@ export const Menu: FC<{
         // Only update if position actually changed significantly to avoid infinite loop
         if (Math.abs(show.y - newY) > 1) {
           setShow((prev) => (prev ? { ...prev, y: newY } : false));
+        }
+      }
+
+      // Check if menu overflows right of viewport (small screens)
+      if (menuRect.right > viewportWidth - padding) {
+        const newX = Math.max(padding, viewportWidth - menuRect.width - padding);
+        if (Math.abs(show.x - newX) > 1) {
+          setShow((prev) => (prev ? { ...prev, x: newX } : false));
         }
       }
     }
@@ -158,7 +167,11 @@ export const Menu: FC<{
         chrome.runtime.sendMessage(
           extensionId,
           { type: 'REMOVE_REFRESH_TOKEN', integrationId: id },
-          () => {}
+          () => {
+            if (chrome.runtime.lastError) {
+              return;
+            }
+          }
         );
       } catch {
         // Silently ignore
@@ -295,7 +308,7 @@ export const Menu: FC<{
       classNames: {
         modal: 'md',
       },
-      title: t('move_add_to_customer', 'Move / Add to customer'),
+      title: t('move_add_to_group', 'Move / Add to group'),
       withCloseButton: false,
       closeOnEscape: true,
       closeOnClickOutside: true,
@@ -533,7 +546,7 @@ export const Menu: FC<{
               </svg>
             </div>
             <div className="text-[14px]">
-              {t('move_add_to_customer', 'Move / add to customer')}
+              {t('move_add_to_group', 'Move / add to group')}
             </div>
           </div>
           <div

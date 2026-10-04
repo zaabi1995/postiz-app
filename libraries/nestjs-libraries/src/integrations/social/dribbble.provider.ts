@@ -5,10 +5,13 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
-import axios from 'axios';
+import { makeSecureId } from '@gitroom/nestjs-libraries/services/make.secure.id';
 import FormData from 'form-data';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  BadBody,
+  SocialAbstract,
+  ValidityMedia,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { DribbbleDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/dribbble.dto';
 import mime from 'mime-types';
 import { DiscordDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/discord.dto';
@@ -25,6 +28,28 @@ export class DribbbleProvider extends SocialAbstract implements SocialProvider {
     return 40000;
   }
   dto = DribbbleDto;
+
+  override async checkValidity([firstItem]: Array<ValidityMedia[]>): Promise<
+    string | true
+  > {
+    const isMp4 = firstItem?.find(
+      (item) => (item?.path?.indexOf?.('mp4') ?? -1) > -1
+    );
+    if (firstItem?.length !== 1) {
+      return 'Requires one item';
+    }
+    if (isMp4) {
+      return 'Does not support mp4 files';
+    }
+    const details = await this.getImageDimensions(firstItem?.[0]?.path);
+    if (
+      (details?.width === 400 && details?.height === 300) ||
+      (details?.width === 800 && details?.height === 600)
+    ) {
+      return true;
+    }
+    return 'Invalid image size. Requires 400x300 or 800x600 px images.';
+  }
 
   async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
     const { access_token, expires_in } = await (
@@ -85,14 +110,14 @@ export class DribbbleProvider extends SocialAbstract implements SocialProvider {
   }
 
   async generateAuthUrl() {
-    const state = makeId(6);
+    const state = makeSecureId(6);
     return {
       url: `https://dribbble.com/oauth/authorize?client_id=${
         process.env.DRIBBBLE_CLIENT_ID
       }&redirect_uri=${encodeURIComponent(
         `${process.env.FRONTEND_URL}/integrations/social/dribbble`
       )}&response_type=code&scope=${this.scopes.join('+')}&state=${state}`,
-      codeVerifier: makeId(10),
+      codeVerifier: makeSecureId(10),
       state,
     };
   }
@@ -138,7 +163,7 @@ export class DribbbleProvider extends SocialAbstract implements SocialProvider {
     accessToken: string,
     postDetails: PostDetails<DribbbleDto>[]
   ): Promise<PostResponse[]> {
-    const { data, status } = await axios.get(
+    const { data, status } = await this.getSsrfSafeAxios().get(
       postDetails?.[0]?.media?.[0]?.path!,
       {
         responseType: 'stream',
@@ -156,16 +181,31 @@ export class DribbbleProvider extends SocialAbstract implements SocialProvider {
     formData.append('title', postDetails[0].settings.title);
     formData.append('description', postDetails[0].message);
 
-    const data2 = await axios.post(
-      'https://api.dribbble.com/v2/shots',
-      formData,
-      {
-        headers: {
-          ...formData.getHeaders(),
-          Authorization: `Bearer ${accessToken}`,
-        },
+    let data2;
+    try {
+      data2 = await this.getSsrfSafeAxios().post(
+        'https://api.dribbble.com/v2/shots',
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+            Authorization: `Bearer ${accessToken}`,
+          },
+        }
+      );
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status >= 400 && status < 500 && status !== 429) {
+        throw new BadBody(
+          this.identifier,
+          JSON.stringify(err?.response?.data ?? {}),
+          '{}',
+          err?.response?.data?.message ||
+            `Dribbble rejected the shot with status ${status}`
+        );
       }
-    );
+      throw err;
+    }
 
     const location = data2.headers['location'];
     const newId = location.split('/').at(-1);
