@@ -87,11 +87,30 @@ const DraftsInner: FC<{ integrations: any[] }> = ({ integrations }) => {
   const fetch = useFetch();
 
   const onCopyAndOpen = useCallback(async (draft: DraftRow) => {
-    // Embedded composer: open Postiz's AddEditModal inline rather than
-    // navigating to /launches. The modal handles per-channel editing,
-    // image attachment, and scheduling natively. No clipboard, no nav.
-    setLaunchingDraft(draft);
-  }, []);
+    // Direct in-platform launch: call /drafts/:id/launch which creates Postiz
+    // drafts on LinkedIn + X via the native PostsService. No new tab, no
+    // clipboard juggling. On success, navigates to /launches?group=<id> so
+    // user lands on the composer with the draft already loaded.
+    setToast('Creating Postiz draft for LinkedIn + X...');
+    try {
+      const res = await fetch(`/drafts/${draft.id}/launch`, { method: 'POST' });
+      const json = await (res as any).json();
+      if (!json?.ok) {
+        setToast(`Failed: ${json?.message || 'unknown error'}`);
+        setTimeout(() => setToast(null), 6000);
+        return;
+      }
+      const postCount = json.postIds?.length || 0;
+      setToast(`Postiz draft created on ${postCount} channels. Opening calendar...`);
+      setTimeout(() => setToast(null), 5000);
+      void mutate();
+      const msg = encodeURIComponent(`Draft created on ${postCount} channel${postCount===1?'':'s'} (LinkedIn + X). Click the card to edit and schedule.`);
+      router.push(`/launches?display=week&msg=${msg}`);
+    } catch (e: any) {
+      setToast(`Network error: ${e?.message || String(e)}`);
+      setTimeout(() => setToast(null), 6000);
+    }
+  }, [fetch, router, mutate]);
 
   const onCopyOne = useCallback(async (text: string, label: string) => {
     try {

@@ -351,14 +351,14 @@ export class DraftsController {
         posts.push({
           integration: { id: linkedinInt.id },
           value: [{ content: draft.linkedinBody, image: imagesField }],
-          settings: {},
+          settings: { __type: linkedinInt.providerIdentifier },
         });
       }
       if (xInt && draft.xBody) {
         posts.push({
           integration: { id: xInt.id },
           value: [{ content: draft.xBody, image: imagesField }],
-          settings: {},
+          settings: { __type: xInt.providerIdentifier },
         });
       }
       if (posts.length === 0) return { ok: false, message: 'Nothing to post' };
